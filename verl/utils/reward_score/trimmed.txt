@@ -1,0 +1,193 @@
+You are a senior CUDA-extension developer.
+Your job is to **FIX** the compilation or runtime errors in the Python script
+shown below.
+
+OUTPUT RULES (STRICT) ────────────────────────────────────────────────────────────────
+1. Inside the block, follow **exactly** this order:
+   1. Imports – `torch`, `torch.nn`, `load_inline`.
+   2. `source` – triple-quoted CUDA string(s) (kernel + host wrapper).
+   3. `cpp_src` – prototypes for *all* kernels you expose.
+   4. **One** `load_inline` call per kernel group.
+   5. `class ModelNew(nn.Module)` – mirrors original inputs/outputs but calls
+      your CUDA kernels.
+2. **Do NOT include** testing code, `if __name__ == "__main__"`, or extra prose.
+
+────────────────────────────────────────────────────────────────
+ERROR LOG
+────────────────────────────────────────────────────────────────
+Error building extension 'custom_matmul_kernel': [1/3] /usr/local/cuda-12.4/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -ccbin /mnt/data1/zha00175/miniconda/envs/CudaAgents/bin/x86_64-conda-linux-gnu-cc -DTORCH_EXTENSION_NAME=custom_matmul_kernel -DTORCH_API_INCLUDE_EXTENSION_H -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/lib/python3.11/site-packages/torch/include -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/lib/python3.11/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-12.4/include -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/include/python3.11 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_90,code=compute_90 -gencode=arch=compute_90,code=sm_90 --compiler-options '-fPIC' -O3 -std=c++17 -c /home/zha00175/.cache/torch_extensions/py311_cu128/custom_matmul_kernel/cuda.cu -o cuda.cuda.o 
+FAILED: [code=2] cuda.cuda.o 
+/usr/local/cuda-12.4/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -ccbin /mnt/data1/zha00175/miniconda/envs/CudaAgents/bin/x86_64-conda-linux-gnu-cc -DTORCH_EXTENSION_NAME=custom_matmul_kernel -DTORCH_API_INCLUDE_EXTENSION_H -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/lib/python3.11/site-packages/torch/include -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/lib/python3.11/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-12.4/include -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/include/python3.11 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_90,code=compute_90 -gencode=arch=compute_90,code=sm_90 --compiler-options '-fPIC' -O3 -std=c++17 -c /home/zha00175/.cache/torch_extensions/py311_cu128/custom_matmul_kernel/cuda.cu -o cuda.cuda.o 
+nvcc warning : incompatible redefinition for option 'compiler-bindir', the last value of this option was used
+/home/zha00175/.cache/torch_extensions/py311_cu128/custom_matmul_kernel/cuda.cu(86): error: namespace "at::cuda" has no member "getCurrentCUDAStream"
+      matmul_tiled_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+                                                      ^
+
+1 error detected in the compilation of "/home/zha00175/.cache/torch_extensions/py311_cu128/custom_matmul_kernel/cuda.cu".
+[2/3] /mnt/data1/zha00175/miniconda/envs/CudaAgents/bin/x86_64-conda-linux-gnu-c++ -MMD -MF main.o.d -DTORCH_EXTENSION_NAME=custom_matmul_kernel -DTORCH_API_INCLUDE_EXTENSION_H -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/lib/python3.11/site-packages/torch/include -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/lib/python3.11/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda-12.4/include -isystem /mnt/data1/zha00175/miniconda/envs/CudaAgents/include/python3.11 -fPIC -std=c++17 -c /home/zha00175/.cache/torch_extensions/py311_cu128/custom_matmul_kernel/main.cpp -o main.o 
+ninja: build stopped: subcommand failed.
+
+────────────────────────────────────────────────────────────────
+OLD CODE (read-only)
+────────────────────────────────────────────────────────────────
+# <complete ModelNew code>
+import torch
+import torch.nn as nn
+from torch.utils.cpp_extension import load_inline
+
+###############################################################################
+#                           Custom CUDA MatMul Kernel                         #
+###############################################################################
+
+CUDA_SRC = r"""
+#include <torch/extension.h>
+#include <cuda_runtime.h>
+
+#ifndef CHECK_CUDA
+#define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
+#endif
+
+#ifndef CHECK_CONTIGUOUS
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#endif
+
+#define TILE_SIZE 32
+
+/* -------------------------------------------------------------------------- */
+/*                           Tiled MatMul Kernel                              */
+/* -------------------------------------------------------------------------- */
+__global__ void matmul_tiled_kernel(const float* __restrict__ A,
+                                    const float* __restrict__ B,
+                                    float* __restrict__ C,
+                                    int M, int N, int K) {
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    float acc = 0.f;
+
+    // Loop over tiles of A/B in K dimension
+    for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+        int tiledRow = t * TILE_SIZE + threadIdx.x;   // index in K for A
+        int tiledCol = t * TILE_SIZE + threadIdx.y;   // index in K for B
+
+        // Load A tile (M x K)
+        if (row < M && tiledRow < K)
+            As[threadIdx.y][threadIdx.x] = A[row * K + tiledRow];
+        else
+            As[threadIdx.y][threadIdx.x] = 0.f;
+
+        // Load B tile (K x N)
+        if (tiledCol < K && col < N)
+            Bs[threadIdx.y][threadIdx.x] = B[tiledCol * N + col];
+        else
+            Bs[threadIdx.y][threadIdx.x] = 0.f;
+
+        __syncthreads();
+
+        // Compute partial product for this tile
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; ++k)
+            acc += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+
+        __syncthreads();
+    }
+
+    // Store the accumulated value
+    if (row < M && col < N)
+        C[row * N + col] = acc;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                      C++/CUDA Launcher Function                            */
+/* -------------------------------------------------------------------------- */
+torch::Tensor matmul_cuda(torch::Tensor A, torch::Tensor B) {
+    CHECK_CUDA(A);
+    CHECK_CUDA(B);
+    CHECK_CONTIGUOUS(A);
+    CHECK_CONTIGUOUS(B);
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A and B must be 2D tensors");
+    TORCH_CHECK(A.size(1) == B.size(0), "Inner dimensions must match");
+
+    const int64_t M = A.size(0);
+    const int64_t K = A.size(1);
+    const int64_t N = B.size(1);
+
+    auto C = torch::zeros({M, N}, A.options());
+
+    dim3 block(TILE_SIZE, TILE_SIZE);
+    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+              (M + TILE_SIZE - 1) / TILE_SIZE);
+
+    matmul_tiled_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        A.data_ptr<float>(),
+        B.data_ptr<float>(),
+        C.data_ptr<float>(),
+        M, N, K
+    );
+
+    // Optional: synchronize if you need correctness without subsequent kernel launches
+    // cudaDeviceSynchronize();
+
+    return C;
+}
+"""
+
+CPP_HDR = "torch::Tensor matmul_cuda(torch::Tensor A, torch::Tensor B);"
+
+matmul_module = load_inline(
+    name="custom_matmul_kernel",
+    cpp_sources=CPP_HDR,
+    cuda_sources=CUDA_SRC,
+    functions=["matmul_cuda"],
+    verbose=False,
+    extra_cuda_cflags=["-O3", "-std=c++17"],
+)
+
+###############################################################################
+#                                   ModelNew                                  #
+###############################################################################
+
+class ModelNew(nn.Module):
+    """
+    Optimized model using a custom CUDA kernel for matrix multiplication.
+    """
+    def __init__(self) -> None:
+        super().__init__()
+        self.matmul = matmul_module.matmul_cuda
+
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        # Ensure inputs are float32 CUDA contiguous tensors
+        A = A.to(torch.float32, non_blocking=True).contiguous()
+        B = B.to(torch.float32, non_blocking=True).contiguous()
+        return self.matmul(A, B)
+
+
+# ----------------------------------------------------------------------------------
+# Optional helpers (matching the original structure for completeness of the module)
+# ----------------------------------------------------------------------------------
+M = 1024 * 2
+K = 4096 * 2
+N = 2048 * 2
+
+def get_inputs():
+    A = torch.rand(M, K, device="cuda", dtype=torch.float32)
+    B = torch.rand(K, N, device="cuda", dtype=torch.float32)
+    return [A, B]
+
+def get_init_inputs():
+    return []  # No initialization tensors required
+
+────────────────────────────────────────────────────────────────
+Main Critical Problem
+────────────────────────────────────────────────────────────────
+critical_issue: Kernel launch uses at::cuda::getCurrentCUDAStream, undefined.
+why_it_matters: Compilation fails, so the custom matmul module cannot build; model cannot run, producing total mismatch.
+minimal_fix_hint: Include ATen/cuda/CUDAContext.h or use c10::cuda::getCurrentCUDAStream.
+
+```python
+# <your corrected code>
+```
+# ==========================================================
