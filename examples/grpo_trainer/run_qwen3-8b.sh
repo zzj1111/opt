@@ -3,6 +3,31 @@
 
 set -x
 
+# Parse command-line arguments
+BETA1=0.9
+BETA2=0.999
+LR=1e-6
+ROUND=1
+NOTE=""
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --beta1) BETA1="$2"; shift 2 ;;
+        --beta2) BETA2="$2"; shift 2 ;;
+        --lr) LR="$2"; shift 2 ;;
+        --round) ROUND="$2"; shift 2 ;;
+        --note) NOTE="$2"; shift 2 ;;
+        *) EXTRA_ARGS+=("$1"); shift ;;
+    esac
+done
+
+# Auto-generate experiment name: date_round_beta1_beta2_lr[_note]
+DATE=$(date +%m%d)
+EXP_NAME="${DATE}_r${ROUND}_b1${BETA1}_b2${BETA2}_lr${LR}"
+if [[ -n "$NOTE" ]]; then
+    EXP_NAME="${EXP_NAME}_${NOTE}"
+fi
+
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
@@ -17,7 +42,8 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=Qwen/Qwen3-4B \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=$LR \
+    actor_rollout_ref.actor.optim.betas="[$BETA1,$BETA2]" \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
@@ -44,9 +70,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_grpo_example_gsm8k' \
-    trainer.experiment_name='qwen3_8b_function_rm' \
+    trainer.experiment_name="$EXP_NAME" \
+    trainer.default_local_dir="checkpoints/$EXP_NAME" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
     trainer.test_freq=5 \
-    trainer.total_epochs=15 $@
+    trainer.total_epochs=15 "${EXTRA_ARGS[@]}"
