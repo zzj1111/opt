@@ -1,7 +1,11 @@
+#!/bin/bash
 # Tested successfully on the hiyouga/verl:ngc-th2.6.0-cu126-vllm0.8.4-flashinfer0.2.2-cxx11abi0 image.
 # It outperforms the Qwen2 7B base model by two percentage points on the test set of GSM8K.
 
 set -x
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # Parse command-line arguments
 BETA1=0.9
@@ -51,6 +55,24 @@ fi
 EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
 if [[ -n "$NOTE" ]]; then
     EXP_NAME="${EXP_NAME}_${NOTE}"
+fi
+
+# If not inside tmux, launch a tmux session and re-run this script inside it
+if [[ -z "$TMUX" ]]; then
+    TMUX_SESSION="train_${EXP_NAME}"
+    # Build the full command to re-run inside tmux
+    ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL"
+    if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
+    for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
+
+    tmux new-session -d -s "$TMUX_SESSION" \
+        "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
+         conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
+         cd $PROJ_DIR && \
+         bash $SCRIPT_DIR/run_qwen3-8b.sh $ARGS; \
+         exec bash"
+    echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
+    exit 0
 fi
 
 export CUDA_VISIBLE_DEVICES=$GPUS
