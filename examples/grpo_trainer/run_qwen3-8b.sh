@@ -7,8 +7,9 @@ set -x
 BETA1=0.9
 BETA2=0.999
 LR=1e-6
-ROUND=1
+ROUND=""
 NOTE=""
+GPUS="0,1,2,3"
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -17,18 +18,37 @@ while [[ $# -gt 0 ]]; do
         --lr) LR="$2"; shift 2 ;;
         --round) ROUND="$2"; shift 2 ;;
         --note) NOTE="$2"; shift 2 ;;
+        --gpus) GPUS="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
 
+# Count number of GPUs from comma-separated list
+NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
+
 # Auto-generate experiment name: date_round_beta1_beta2_lr[_note]
 DATE=$(date +%m%d)
+
+# Auto-increment round if not explicitly specified
+if [[ -z "$ROUND" ]]; then
+    MAX_ROUND=0
+    for dir in checkpoints/${DATE}_r*; do
+        if [[ -d "$dir" ]]; then
+            R=$(basename "$dir" | grep -oP '(?<=_r)\d+')
+            if [[ -n "$R" && "$R" -gt "$MAX_ROUND" ]]; then
+                MAX_ROUND=$R
+            fi
+        fi
+    done
+    ROUND=$((MAX_ROUND + 1))
+fi
+
 EXP_NAME="${DATE}_r${ROUND}_b1${BETA1}_b2${BETA2}_lr${LR}"
 if [[ -n "$NOTE" ]]; then
     EXP_NAME="${EXP_NAME}_${NOTE}"
 fi
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=$GPUS
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
 
@@ -55,7 +75,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=$NGPUS \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=5 \
@@ -72,7 +92,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.project_name='verl_grpo_example_gsm8k' \
     trainer.experiment_name="$EXP_NAME" \
     trainer.default_local_dir="checkpoints/$EXP_NAME" \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
     trainer.test_freq=5 \
