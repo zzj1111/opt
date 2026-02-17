@@ -10,6 +10,7 @@ LR=1e-6
 ROUND=""
 NOTE=""
 GPUS="0,1,2,3"
+MODEL="Qwen/Qwen3-4B"
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -19,9 +20,13 @@ while [[ $# -gt 0 ]]; do
         --round) ROUND="$2"; shift 2 ;;
         --note) NOTE="$2"; shift 2 ;;
         --gpus) GPUS="$2"; shift 2 ;;
+        --model) MODEL="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+# Extract short model name: "Qwen/Qwen3-4B" -> "Qwen3-4B"
+MODEL_SHORT=$(basename "$MODEL")
 
 # Count number of GPUs from comma-separated list
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
@@ -43,7 +48,7 @@ if [[ -z "$ROUND" ]]; then
     ROUND=$((MAX_ROUND + 1))
 fi
 
-EXP_NAME="${DATE}_r${ROUND}_b1${BETA1}_b2${BETA2}_lr${LR}"
+EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
 if [[ -n "$NOTE" ]]; then
     EXP_NAME="${EXP_NAME}_${NOTE}"
 fi
@@ -61,7 +66,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B \
+    actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=$LR \
     actor_rollout_ref.actor.optim.betas="[$BETA1,$BETA2]" \
     actor_rollout_ref.model.use_remove_padding=True \
