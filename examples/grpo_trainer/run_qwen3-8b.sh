@@ -38,23 +38,22 @@ NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 # Auto-generate experiment name: date_round_beta1_beta2_lr[_note]
 DATE=$(date +%m%d)
 
-# Auto-increment round if not explicitly specified
+# Auto-increment round: use mkdir as atomic lock to avoid conflicts
 if [[ -z "$ROUND" ]]; then
-    MAX_ROUND=0
-    for dir in checkpoints/${DATE}_r*; do
-        if [[ -d "$dir" ]]; then
-            R=$(basename "$dir" | grep -oP '(?<=_r)\d+')
-            if [[ -n "$R" && "$R" -gt "$MAX_ROUND" ]]; then
-                MAX_ROUND=$R
-            fi
+    ROUND=1
+    while true; do
+        EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
+        if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
+        # mkdir fails if dir already exists, acting as an atomic claim
+        if mkdir -p "checkpoints" && mkdir "checkpoints/$EXP_NAME" 2>/dev/null; then
+            break
         fi
+        ROUND=$((ROUND + 1))
     done
-    ROUND=$((MAX_ROUND + 1))
-fi
-
-EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
-if [[ -n "$NOTE" ]]; then
-    EXP_NAME="${EXP_NAME}_${NOTE}"
+else
+    EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
+    if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
+    mkdir -p "checkpoints/$EXP_NAME"
 fi
 
 # If not inside tmux, launch a tmux session and re-run this script inside it
