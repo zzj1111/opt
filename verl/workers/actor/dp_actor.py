@@ -1228,7 +1228,8 @@ class DataParallelPPOActor(BasePPOActor):
 
 
         current_step=get_optimizer_step(self.actor_optimizer)
-        log_fsdp_analysis(stats_after, current_step, save_dir="./checkpoints/analysis_data", stats_pre=stats_pre)
+        analysis_save_dir = os.path.join(os.environ.get("VERL_DEFAULT_LOCAL_DIR", "./checkpoints"), "analysis_data")
+        log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre)
 
         # 将 global 标量通过 metrics 管道回传给 trainer，最终写入 wandb
         analysis_metrics = {}
