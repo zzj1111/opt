@@ -79,6 +79,10 @@ export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
 export VERL_DEFAULT_LOCAL_DIR="checkpoints/$EXP_NAME"
 
+# Save terminal output to log file
+LOG_FILE="checkpoints/$EXP_NAME/train.log"
+echo "Logging to: $LOG_FILE"
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=data/gsm8k/train.parquet \
@@ -123,4 +127,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
     trainer.test_freq=5 \
-    trainer.total_epochs=15 "${EXTRA_ARGS[@]}"
+    trainer.total_epochs=15 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
