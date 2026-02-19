@@ -24,9 +24,9 @@ MODEL="Qwen/Qwen3-1.7B"
 NOTE="sweep"
 
 # Parameter grid (space-separated values)
-LR_LIST="1e-6"
+LR_LIST="1e-7 1e-6 1e-5"
 BETA1_LIST="0.9"
-BETA2_LIST="0.999 0.95"
+BETA2_LIST="0.95 0.999"
 # =====================================================================
 
 # Build the list of all experiments
