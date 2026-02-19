@@ -19,6 +19,7 @@ Single Process Actor
 
 import logging
 import os
+import re
 import wandb
 import torch
 from torch import nn
@@ -125,45 +126,115 @@ def get_optimizer_step(optimizer):
 
 
 
+def _get_layer_group(name):
+    """Extract layer group name from parameter name for per-layer analysis."""
+    m = re.search(r'(layers\.\d+|embed_tokens|lm_head|model\.norm)', name)
+    if m:
+        return m.group(1)
+    return "other"
+
+
 @torch.no_grad()
 def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
-    stats = {"global": {}, "last_layer": {}}
+    stats = {"global": {}, "last_layer": {}, "per_layer": {}}
     rank = dist.get_rank()
-    
+
     # 1. 获取优化器超参数
     pg = optimizer.param_groups[0]
     lr, eps = pg['lr'], pg['eps']
     beta1, beta2 = pg.get('betas', (0.9, 0.999))
 
-    # 2. 全局统计
-    accum = torch.zeros(5, device=torch.cuda.current_device(), dtype=torch.float64)
+    # 2. 全局统计 + per-layer 统计
+    # Discover layer groups first
+    base_model = getattr(model, "module", model)
+    layer_groups = {}  # group_name -> index
+    for name, _ in base_model.named_parameters():
+        group = _get_layer_group(name)
+        if group not in layer_groups:
+            layer_groups[group] = len(layer_groups)
+
+    # Sort layer names for consistent ordering
+    sorted_names = sorted(layer_groups.keys(), key=lambda x: (
+        0 if x == "embed_tokens" else
+        1 if x.startswith("layers.") else
+        2 if x == "model.norm" else
+        3 if x == "lm_head" else 4,
+        int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) and x.startswith("layers.") else 0
+    ))
+    layer_idx = {name: i for i, name in enumerate(sorted_names)}
+    num_layers = len(sorted_names)
+
+    # accum: [5] for global, per_layer_accum: [num_layers, 5] for per-layer
+    # Columns: 0=w_norm_sq, 1=g_norm_sq, 2=m_norm_sq, 3=eff_lr_sum, 4=numel
+    dev = torch.cuda.current_device()
+    accum = torch.zeros(5, device=dev, dtype=torch.float64)
+    per_layer_accum = torch.zeros(num_layers, 5, device=dev, dtype=torch.float64)
+
+    # Build param->name mapping
+    param_to_name = {p: n for n, p in base_model.named_parameters()}
+
     for p in model.parameters():
-        accum[0] += p.norm().pow(2) # Param
-        accum[4] += p.numel()       # Count
+        w_sq = p.norm().pow(2)
+        numel = p.numel()
+        accum[0] += w_sq
+        accum[4] += numel
+
+        g_sq = torch.tensor(0.0, device=dev, dtype=torch.float64)
         if p.grad is not None:
-            accum[1] += p.grad.norm().pow(2) # Grad
-        
+            g_sq = p.grad.norm().pow(2)
+            accum[1] += g_sq
+
+        m_sq = torch.tensor(0.0, device=dev, dtype=torch.float64)
+        elr_sum = torch.tensor(0.0, device=dev, dtype=torch.float64)
         if p in optimizer.state:
             st = optimizer.state[p]
             if "exp_avg" in st and "exp_avg_sq" in st:
-
                 step = st.get("step")
                 if isinstance(step, torch.Tensor): step = step.float().mean().item()
                 bias_c1 = 1 - beta1 ** step
                 bias_c2 = 1 - beta2 ** step
-                
-                accum[2] += st["exp_avg"].norm().pow(2) # Mom
-                
-
+                m_sq = st["exp_avg"].norm().pow(2)
+                accum[2] += m_sq
                 denom = (st["exp_avg_sq"].sqrt() / (bias_c2**0.5)).add_(eps)
-                accum[3] += (lr / bias_c1 / denom).sum()
+                elr_sum = (lr / bias_c1 / denom).sum()
+                accum[3] += elr_sum
 
-    dist.all_reduce(accum, op=dist.ReduceOp.SUM)
+        # Per-layer accumulation
+        name = param_to_name.get(p, None)
+        if name is not None:
+            group = _get_layer_group(name)
+            idx = layer_idx.get(group, None)
+            if idx is not None:
+                per_layer_accum[idx, 0] += w_sq
+                per_layer_accum[idx, 1] += g_sq
+                per_layer_accum[idx, 2] += m_sq
+                per_layer_accum[idx, 3] += elr_sum
+                per_layer_accum[idx, 4] += numel
+
+    # Single all_reduce for both global and per-layer
+    combined = torch.cat([accum.unsqueeze(0), per_layer_accum], dim=0)  # [1+num_layers, 5]
+    dist.all_reduce(combined, op=dist.ReduceOp.SUM)
+    accum = combined[0]
+    per_layer_accum = combined[1:]
+
     g_num = accum[4].item()
     stats["global"]["param_norm"] = (accum[0] / (g_num if rms_norm else 1.0)).sqrt().item()
     stats["global"]["grad_norm"] = (accum[1] / (g_num if rms_norm else 1.0)).sqrt().item()
     stats["global"]["mom_norm"] = (accum[2] / (accum[4] if rms_norm else 1.0)).sqrt().item()
     stats["global"]["eff_lr_mean"] = (accum[3] / g_num).item()
+
+    # Per-layer stats
+    stats["per_layer"]["layer_names"] = sorted_names
+    stats["per_layer"]["w_norm"] = []
+    stats["per_layer"]["g_norm"] = []
+    stats["per_layer"]["m_norm"] = []
+    stats["per_layer"]["eff_lr_mean"] = []
+    for i in range(num_layers):
+        n = per_layer_accum[i, 4].item()
+        stats["per_layer"]["w_norm"].append(per_layer_accum[i, 0].sqrt().item())
+        stats["per_layer"]["g_norm"].append(per_layer_accum[i, 1].sqrt().item())
+        stats["per_layer"]["m_norm"].append(per_layer_accum[i, 2].sqrt().item())
+        stats["per_layer"]["eff_lr_mean"].append((per_layer_accum[i, 3] / n).item() if n > 0 else 0.0)
 
     # 3. 最后一层 (LM_Head) 
     lm_head = getattr(model, "get_output_embeddings", lambda: None)() or getattr(model, "lm_head", None)
@@ -388,9 +459,24 @@ def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plo
                     save_payload[k] = v
             torch.save(save_payload, file_path)
 
+        # --- B2. Per-layer metrics to JSONL ---
+        if "per_layer" in stats and stats["per_layer"]:
+            pl_record = {"grad_step": step}
+            for k, v in stats["per_layer"].items():
+                pl_record[k] = v
+            pl_jsonl_path = os.path.join(save_dir, "per_layer_metrics.jsonl")
+            with open(pl_jsonl_path, "a") as f:
+                f.write(json.dumps(pl_record) + "\n")
+
         # --- C. 定期绘图 ---
         if step % plot_every == 0:
             _plot_grad_step_metrics(jsonl_path, save_dir)
+            pl_jsonl = os.path.join(save_dir, "per_layer_metrics.jsonl")
+            if os.path.exists(pl_jsonl):
+                _plot_weight_sg_ratio(pl_jsonl, save_dir)
+                _plot_per_layer_eff_lr(pl_jsonl, save_dir)
+            # Figure 10: token-class SG norm from latest .pt file
+            _plot_token_class_sg_norm(step, save_dir)
 
 
 def _plot_grad_step_metrics(jsonl_path, save_dir):
@@ -496,6 +582,145 @@ def _plot_grad_step_metrics(jsonl_path, save_dir):
         plt.close(fig)
 
 
+def _plot_weight_sg_ratio(pl_jsonl_path, save_dir):
+    """Figure 2: Weight-SG Ratio and Weight-Momentum Ratio per layer over training."""
+    import json
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    records = []
+    with open(pl_jsonl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    if len(records) < 2:
+        return
+
+    steps = [r["grad_step"] for r in records]
+    layer_names = records[0]["layer_names"]
+    num_layers = len(layer_names)
+
+    plot_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    # Use colormap for many layers
+    cmap = plt.cm.get_cmap("tab20", num_layers)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 7))
+
+    for i, name in enumerate(layer_names):
+        # Weight-SG ratio: ||w||/||grad||
+        wsg_ratio = []
+        for r in records:
+            w = r["w_norm"][i]
+            g = r["g_norm"][i]
+            wsg_ratio.append(w / g if g > 0 else float('nan'))
+        ax1.plot(steps, wsg_ratio, label=name, color=cmap(i), linewidth=1.0, alpha=0.8)
+
+        # Weight-Momentum ratio: ||w||/||m||
+        wm_ratio = []
+        for r in records:
+            w = r["w_norm"][i]
+            m = r["m_norm"][i]
+            wm_ratio.append(w / m if m > 0 else float('nan'))
+        ax2.plot(steps, wm_ratio, label=name, color=cmap(i), linewidth=1.0, alpha=0.8)
+
+    ax1.set_xlabel("Iterations")
+    ax1.set_ylabel(r"$\|w\|_F / \|\nabla f\|_F$")
+    ax1.set_title("Weight-SG Ratio (Adam)")
+    ax1.set_yscale("log")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(fontsize=6, ncol=2)
+
+    ax2.set_xlabel("Iterations")
+    ax2.set_ylabel(r"$\|w\|_F / \|m\|_F$")
+    ax2.set_title("Weight-Momentum Ratio (Adam)")
+    ax2.set_yscale("log")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=6, ncol=2)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "weight_sg_momentum_ratio.png"), dpi=150)
+    plt.close(fig)
+
+
+def _plot_per_layer_eff_lr(pl_jsonl_path, save_dir):
+    """Figure 8: Mean effective learning rate per layer over training."""
+    import json
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    records = []
+    with open(pl_jsonl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    if len(records) < 2:
+        return
+
+    steps = [r["grad_step"] for r in records]
+    layer_names = records[0]["layer_names"]
+    num_layers = len(layer_names)
+
+    plot_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    cmap = plt.cm.get_cmap("tab20", num_layers)
+
+    fig, ax = plt.subplots(figsize=(12, 7))
+    for i, name in enumerate(layer_names):
+        vals = [r["eff_lr_mean"][i] for r in records]
+        ax.plot(steps, vals, label=name, color=cmap(i), linewidth=1.0, alpha=0.8)
+
+    ax.set_xlabel("Iteration (t)")
+    ax.set_ylabel(r"$\bar{a}^{eff}_{\ell,t}$")
+    ax.set_title("Mean Effective Stepsize of Adam")
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=6, ncol=2)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "per_layer_eff_lr.png"), dpi=150)
+    plt.close(fig)
+
+
+def _plot_token_class_sg_norm(step, save_dir):
+    """Figure 10: Per-token-class stochastic gradient norm at the output layer."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    pt_path = os.path.join(save_dir, f"layer_stats_step_{step:05d}.pt")
+    if not os.path.exists(pt_path):
+        return
+
+    data = torch.load(pt_path, map_location="cpu", weights_only=True)
+    if "g_norm" not in data:
+        return
+
+    g_norm = data["g_norm"]
+    # Show first 1000 token classes (or fewer if vocab is smaller)
+    n_tokens = min(1000, len(g_norm))
+    g_norm = g_norm[:n_tokens]
+
+    plot_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    ax.scatter(range(n_tokens), g_norm.numpy(), s=2, alpha=0.6, color="tab:purple")
+    ax.set_xlabel("Token ID (Token i)")
+    ax.set_ylabel(r"SG Norm $\|g_i\|_2$")
+    ax.set_title(f"Output Layer Token-wise SG Norm at Iteration {step}")
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, f"token_class_sg_norm_step_{step:05d}.png"), dpi=150)
+    plt.close(fig)
 
 
 import math
