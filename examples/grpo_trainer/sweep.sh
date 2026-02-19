@@ -19,7 +19,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # ===================== EDIT YOUR SWEEP GRID HERE =====================
-GPUS="0,1,2,3"
+GPUS="0,1,2,3,4,5,6,7"
 MODEL="Qwen/Qwen3-1.7B"
 NOTE="sweep"
 
