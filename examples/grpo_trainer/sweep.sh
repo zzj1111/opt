@@ -20,13 +20,13 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # ===================== EDIT YOUR SWEEP GRID HERE =====================
 GPUS="0,1,2,3"
-MODEL="Qwen/Qwen3-4B"
+MODEL="Qwen/Qwen3-1.7B"
 NOTE="sweep"
 
 # Parameter grid (space-separated values)
-LR_LIST="1e-6 5e-7 1e-5"
+LR_LIST="1e-6"
 BETA1_LIST="0.9"
-BETA2_LIST="0.95 0.999"
+BETA2_LIST="0.999 0.95"
 # =====================================================================
 
 # Build the list of all experiments
