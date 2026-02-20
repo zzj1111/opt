@@ -156,15 +156,16 @@ class LMHeadGradTracker:
         self.exp_avg_sq = None       # [V, H] float32, CPU, rank 0 only
 
         self._fwd_handle = lm_head_module.register_forward_hook(self._fwd_hook)
-        self._bwd_handle = lm_head_module.register_full_backward_hook(self._bwd_hook)
+        # Use pre-hook to avoid view/inplace conflicts with register_full_backward_hook
+        self._bwd_handle = lm_head_module.register_full_backward_pre_hook(self._bwd_pre_hook)
 
     # ------------------------------------------------------------------
     def _fwd_hook(self, module, input, output):
         # Only save during training (eval / no_grad → skip)
         if module.training and torch.is_grad_enabled():
-            self.saved_input = input[0].detach()
+            self.saved_input = input[0].detach().clone()
 
-    def _bwd_hook(self, module, grad_input, grad_output):
+    def _bwd_pre_hook(self, module, grad_output):
         if self.saved_input is None:
             return
         # grad_output[0]: [..., V]  gradient of loss w.r.t. logits
