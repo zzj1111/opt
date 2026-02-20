@@ -31,7 +31,7 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_, fsdp_version as get_fsdp_version
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -134,6 +134,20 @@ def _get_layer_group(name):
     return "other"
 
 
+def _to_local(t):
+    """Convert DTensor to local shard; pass-through for regular tensors."""
+    if isinstance(t, DTensor):
+        return t.to_local()
+    return t
+
+
+def _full_tensor_float(t):
+    """full_tensor() for DTensor, or just .float() for regular tensor."""
+    if isinstance(t, DTensor):
+        return t.full_tensor().float()
+    return t.float()
+
+
 @torch.no_grad()
 def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     stats = {"global": {}, "last_layer": {}, "per_layer": {}}
@@ -170,19 +184,19 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     accum = torch.zeros(5, device=dev, dtype=torch.float64)
     per_layer_accum = torch.zeros(num_layers, 5, device=dev, dtype=torch.float64)
 
-    # Iterate using model.named_parameters() directly to avoid FSDP param object mismatch.
-    # With FSDP, model.parameters() and base_model.named_parameters() may return
-    # different objects (e.g. tied weights like embed_tokens/lm_head get split),
-    # causing param_to_name lookup failures and missing per-layer stats.
+    # Iterate using model.named_parameters() directly.
+    # Use _to_local() to handle both FSDP1 (local shards) and FSDP2 (DTensors)
+    # uniformly: always compute on local shards, then all_reduce to get global values.
     for name, p in model.named_parameters():
-        w_sq = p.norm().pow(2)
-        numel = p.numel()
+        local_p = _to_local(p)
+        w_sq = local_p.norm().pow(2)
+        numel = local_p.numel()
         accum[0] += w_sq
         accum[4] += numel
 
         g_sq = torch.tensor(0.0, device=dev, dtype=torch.float64)
         if p.grad is not None:
-            g_sq = p.grad.norm().pow(2)
+            g_sq = _to_local(p.grad).norm().pow(2)
             accum[1] += g_sq
 
         m_sq = torch.tensor(0.0, device=dev, dtype=torch.float64)
@@ -194,9 +208,11 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 if isinstance(step, torch.Tensor): step = step.float().mean().item()
                 bias_c1 = 1 - beta1 ** step
                 bias_c2 = 1 - beta2 ** step
-                m_sq = st["exp_avg"].norm().pow(2)
+                local_m = _to_local(st["exp_avg"])
+                local_v = _to_local(st["exp_avg_sq"])
+                m_sq = local_m.norm().pow(2)
                 accum[2] += m_sq
-                denom = (st["exp_avg_sq"].sqrt() / (bias_c2**0.5)).add_(eps)
+                denom = (local_v.sqrt() / (bias_c2**0.5)).add_(eps)
                 elr_sum = (lr / bias_c1 / denom).sum()
                 accum[3] += elr_sum
 
@@ -235,49 +251,74 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
         stats["per_layer"]["m_norm"].append(per_layer_accum[i, 2].sqrt().item())
         stats["per_layer"]["eff_lr_mean"].append((per_layer_accum[i, 3] / n).item() if n > 0 else 0.0)
 
-    # 3. 最后一层 (LM_Head)
+    # 3. 最后一层 (LM_Head) — per-token analysis
     lm_head = getattr(model, "get_output_embeddings", lambda: None)() or getattr(model, "lm_head", None)
     if lm_head is not None:
         shard_w = lm_head.weight
-        orig_grad = shard_w.grad # 备份
+        fsdp_ver = get_fsdp_version(model)
 
-        # 内部工具：利用 FSDP 官方 summon 逻辑还原有序矩阵
-        def get_ordered_full_matrix(state_key):
-            if shard_w not in optimizer.state: return None
-            # 临时将状态存入 grad 位，利用 FSDP 索引图还原
-            shard_w.grad = optimizer.state[shard_w][state_key].to(shard_w.dtype)
-            full_matrix = None
+        if fsdp_ver == 2:
+            # --- FSDP2 path: use DTensor.full_tensor() ---
+            # full_tensor() is a collective op; all ranks must call it.
+            full_weight = shard_w.full_tensor().float()
+            full_grad = shard_w.grad.full_tensor().float() if shard_w.grad is not None else None
+            if rank == 0:
+                stats["last_layer"]["shape"] = list(full_weight.shape)
+                stats["last_layer"]["p_norm"] = full_weight.norm(dim=1).cpu().tolist()
+                if full_grad is not None:
+                    stats["last_layer"]["g_norm"] = full_grad.norm(dim=1).cpu().tolist()
+            del full_weight, full_grad
+
+            # Optimizer states
+            if shard_w in optimizer.state:
+                st = optimizer.state[shard_w]
+                if "exp_avg" in st and "exp_avg_sq" in st:
+                    full_m = _full_tensor_float(st["exp_avg"])
+                    full_v = _full_tensor_float(st["exp_avg_sq"])
+                    if rank == 0:
+                        step = st.get("step")
+                        if isinstance(step, torch.Tensor): step = step.float().mean().item()
+                        bc1, bc2 = 1 - beta1**step, 1 - beta2**step
+                        denom_v = full_v.sqrt().div_(bc2**0.5).add_(eps)
+                        full_elr = (lr / bc1) / denom_v
+                        stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
+                        stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
+                        del full_elr, denom_v
+                    del full_m, full_v
+        else:
+            # --- FSDP1 path: use summon_full_params ---
+            orig_grad = shard_w.grad
+
+            def get_ordered_full_matrix(state_key):
+                if shard_w not in optimizer.state: return None
+                shard_w.grad = optimizer.state[shard_w][state_key].to(shard_w.dtype)
+                full_matrix = None
+                with FSDP.summon_full_params(model, with_grads=True):
+                    if rank == 0:
+                        full_matrix = lm_head.weight.grad.clone().float()
+                return full_matrix
+
             with FSDP.summon_full_params(model, with_grads=True):
                 if rank == 0:
-                    full_matrix = lm_head.weight.grad.clone().float()
-            return full_matrix
+                    stats["last_layer"]["shape"] = list(lm_head.weight.shape)
+                    stats["last_layer"]["p_norm"] = lm_head.weight.norm(dim=1).cpu().tolist()
+                    if lm_head.weight.grad is not None:
+                        stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
 
-        # A. 还原参数和梯度
-        with FSDP.summon_full_params(model, with_grads=True):
-            if rank == 0:
-                stats["last_layer"]["shape"] = list(lm_head.weight.shape)
-                stats["last_layer"]["p_norm"] = lm_head.weight.norm(dim=1).cpu().tolist()
-                if lm_head.weight.grad is not None:
-                    stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
+            full_m = get_ordered_full_matrix("exp_avg")
+            full_v = get_ordered_full_matrix("exp_avg_sq")
+            if rank == 0 and full_m is not None and full_v is not None:
+                step = optimizer.state[shard_w].get("step")
+                if isinstance(step, torch.Tensor): step = step.float().mean().item()
+                bc1, bc2 = 1 - beta1**step, 1 - beta2**step
+                full_v.sqrt_().div_(bc2**0.5).add_(eps)
+                full_elr = (lr / bc1) / full_v
+                stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
+                stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
+                del full_m, full_v, full_elr
 
-        # B. 还原有序的动量并计算正确的 EffLR
-        full_m = get_ordered_full_matrix("exp_avg")
-        full_v = get_ordered_full_matrix("exp_avg_sq")
-        
-        if rank == 0 and full_m is not None and full_v is not None:
-            step = optimizer.state[shard_w].get("step")
-            if isinstance(step, torch.Tensor): step = step.float().mean().item()
-            bc1, bc2 = 1 - beta1**step, 1 - beta2**step
-            
-            full_v.sqrt_().div_(bc2**0.5).add_(eps)
-            full_elr = (lr / bc1) / full_v
-            
-            stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
-            stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
-            del full_m, full_v, full_elr
+            shard_w.grad = orig_grad
 
-        shard_w.grad = orig_grad # 还原现场
-        
     return stats
 
 @torch.no_grad()
