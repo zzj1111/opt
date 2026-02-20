@@ -258,33 +258,9 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
         fsdp_ver = get_fsdp_version(model)
 
         if fsdp_ver == 2:
-            # --- FSDP2 path: use DTensor.full_tensor() ---
-            # full_tensor() is a collective op; all ranks must call it.
-            full_weight = shard_w.full_tensor().float()
-            full_grad = shard_w.grad.full_tensor().float() if shard_w.grad is not None else None
-            if rank == 0:
-                stats["last_layer"]["shape"] = list(full_weight.shape)
-                stats["last_layer"]["p_norm"] = full_weight.norm(dim=1).cpu().tolist()
-                if full_grad is not None:
-                    stats["last_layer"]["g_norm"] = full_grad.norm(dim=1).cpu().tolist()
-            del full_weight, full_grad
-
-            # Optimizer states
-            if shard_w in optimizer.state:
-                st = optimizer.state[shard_w]
-                if "exp_avg" in st and "exp_avg_sq" in st:
-                    full_m = _full_tensor_float(st["exp_avg"])
-                    full_v = _full_tensor_float(st["exp_avg_sq"])
-                    if rank == 0:
-                        step = st.get("step")
-                        if isinstance(step, torch.Tensor): step = step.float().mean().item()
-                        bc1, bc2 = 1 - beta1**step, 1 - beta2**step
-                        denom_v = full_v.sqrt().div_(bc2**0.5).add_(eps)
-                        full_elr = (lr / bc1) / denom_v
-                        stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
-                        stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
-                        del full_elr, denom_v
-                    del full_m, full_v
+            # FSDP2: skip last-layer per-token analysis to avoid full_tensor() deadlock.
+            # Per-layer stats (computed above via _to_local) are still available.
+            pass
         else:
             # --- FSDP1 path: use summon_full_params ---
             orig_grad = shard_w.grad
