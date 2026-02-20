@@ -14,7 +14,7 @@ LR=1e-6
 ROUND=""
 NOTE=""
 GPUS="0,1,2,3"
-MODEL="Qwen/Qwen3-1.7B"
+MODEL="Qwen/Qwen3-8B"
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
