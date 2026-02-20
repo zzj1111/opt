@@ -232,6 +232,12 @@ class LMHeadGradTracker:
             eff_lr = lr / bc1 / denom
             stats["eff_lr_cls_mean"] = eff_lr.mean(dim=1).tolist()
 
+            # --- aggregate stats for per-layer injection ---
+            stats["agg_g_norm"] = full_grad.norm().item()
+            stats["agg_m_norm"] = self.exp_avg.norm().item()
+            stats["agg_eff_lr_mean"] = eff_lr.mean().item()
+            stats["agg_numel"] = full_grad.numel()
+
             del full_grad
 
         self.grad_accum = None  # reset for next step (all ranks)
@@ -1239,6 +1245,18 @@ class DataParallelPPOActor(BasePPOActor):
             stats_after["last_layer"].update(lm_head_stats)
             if p_norm is not None:
                 stats_after["last_layer"]["p_norm"] = p_norm
+
+            # Inject "lm_head" as a separate entry in per_layer stats.
+            # With tie_word_embeddings, named_parameters() only lists the shared
+            # param under "embed_tokens" (corrupted).  The tracker gives us the
+            # true lm_head gradient/momentum/eff_lr.
+            pl = stats_after["per_layer"]
+            if "lm_head" not in pl.get("layer_names", []):
+                pl["layer_names"].append("lm_head")
+                pl["w_norm"].append(pl["w_norm"][0] if pl["w_norm"] else 0.0)  # same weight as embed
+                pl["g_norm"].append(lm_head_stats.get("agg_g_norm", 0.0))
+                pl["m_norm"].append(lm_head_stats.get("agg_m_norm", 0.0))
+                pl["eff_lr_mean"].append(lm_head_stats.get("agg_eff_lr_mean", 0.0))
 
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
