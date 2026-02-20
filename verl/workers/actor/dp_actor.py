@@ -145,10 +145,10 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     beta1, beta2 = pg.get('betas', (0.9, 0.999))
 
     # 2. 全局统计 + per-layer 统计
-    # Discover layer groups first
-    base_model = getattr(model, "module", model)
+    # Discover layer groups using model.named_parameters() (FSDP-aware)
+    # This ensures we see ALL parameters including tied weights that FSDP may split.
     layer_groups = {}  # group_name -> index
-    for name, _ in base_model.named_parameters():
+    for name, _ in model.named_parameters():
         group = _get_layer_group(name)
         if group not in layer_groups:
             layer_groups[group] = len(layer_groups)
@@ -170,10 +170,11 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     accum = torch.zeros(5, device=dev, dtype=torch.float64)
     per_layer_accum = torch.zeros(num_layers, 5, device=dev, dtype=torch.float64)
 
-    # Build param->name mapping
-    param_to_name = {p: n for n, p in base_model.named_parameters()}
-
-    for p in model.parameters():
+    # Iterate using model.named_parameters() directly to avoid FSDP param object mismatch.
+    # With FSDP, model.parameters() and base_model.named_parameters() may return
+    # different objects (e.g. tied weights like embed_tokens/lm_head get split),
+    # causing param_to_name lookup failures and missing per-layer stats.
+    for name, p in model.named_parameters():
         w_sq = p.norm().pow(2)
         numel = p.numel()
         accum[0] += w_sq
@@ -200,16 +201,14 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 accum[3] += elr_sum
 
         # Per-layer accumulation
-        name = param_to_name.get(p, None)
-        if name is not None:
-            group = _get_layer_group(name)
-            idx = layer_idx.get(group, None)
-            if idx is not None:
-                per_layer_accum[idx, 0] += w_sq
-                per_layer_accum[idx, 1] += g_sq
-                per_layer_accum[idx, 2] += m_sq
-                per_layer_accum[idx, 3] += elr_sum
-                per_layer_accum[idx, 4] += numel
+        group = _get_layer_group(name)
+        idx = layer_idx.get(group, None)
+        if idx is not None:
+            per_layer_accum[idx, 0] += w_sq
+            per_layer_accum[idx, 1] += g_sq
+            per_layer_accum[idx, 2] += m_sq
+            per_layer_accum[idx, 3] += elr_sum
+            per_layer_accum[idx, 4] += numel
 
     # Single all_reduce for both global and per-layer
     combined = torch.cat([accum.unsqueeze(0), per_layer_accum], dim=0)  # [1+num_layers, 5]
