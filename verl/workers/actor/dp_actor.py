@@ -149,37 +149,37 @@ class LMHeadGradTracker:
     """
 
     def __init__(self, lm_head_module):
-        self.saved_input = None
         self.grad_accum = None       # [V, H] float32, GPU, accumulated across micro-batches
         self.step_count = 0
         self.exp_avg = None          # [V, H] float32, CPU, rank 0 only
         self.exp_avg_sq = None       # [V, H] float32, CPU, rank 0 only
 
+        # Only use a forward hook. Inside it we register a *tensor-level* hook
+        # on the output to capture grad_output during backward.
+        # Module-level backward hooks (full_backward_hook / pre_hook) insert
+        # custom autograd Functions that break downstream inplace ops (div_).
         self._fwd_handle = lm_head_module.register_forward_hook(self._fwd_hook)
-        # Use pre-hook to avoid view/inplace conflicts with register_full_backward_hook
-        self._bwd_handle = lm_head_module.register_full_backward_pre_hook(self._bwd_pre_hook)
 
     # ------------------------------------------------------------------
     def _fwd_hook(self, module, input, output):
-        # Only save during training (eval / no_grad → skip)
-        if module.training and torch.is_grad_enabled():
-            self.saved_input = input[0].detach().clone()
-
-    def _bwd_pre_hook(self, module, grad_output):
-        if self.saved_input is None:
+        if not (module.training and torch.is_grad_enabled()):
             return
-        # grad_output[0]: [..., V]  gradient of loss w.r.t. logits
-        # saved_input:     [..., H]  hidden states entering lm_head
-        go = grad_output[0].detach().float().reshape(-1, grad_output[0].shape[-1])  # [N, V]
-        inp = self.saved_input.float().reshape(-1, self.saved_input.shape[-1])       # [N, H]
-        local_grad = go.t() @ inp                                                    # [V, H]
+        saved_input = input[0].detach().clone()   # [*, H]
+        tracker = self                            # prevent closure over self via __del__ cycle
 
-        if self.grad_accum is None:
-            self.grad_accum = local_grad
-        else:
-            self.grad_accum += local_grad
+        def _tensor_grad_hook(grad):
+            # grad: [..., V]  gradient of loss w.r.t. lm_head output (logits)
+            go = grad.detach().float().reshape(-1, grad.shape[-1])              # [N, V]
+            inp = saved_input.float().reshape(-1, saved_input.shape[-1])        # [N, H]
+            local_grad = go.t() @ inp                                           # [V, H]
+            if tracker.grad_accum is None:
+                tracker.grad_accum = local_grad
+            else:
+                tracker.grad_accum += local_grad
 
-        self.saved_input = None  # free GPU memory
+        # Tensor hook: fires when gradient flows through this tensor.
+        # Does NOT modify the autograd graph, so no view/inplace conflicts.
+        output.register_hook(_tensor_grad_hook)
 
     # ------------------------------------------------------------------
     def finalize_step(self, optimizer_pg, clip_ratio=1.0):
@@ -239,7 +239,6 @@ class LMHeadGradTracker:
 
     def remove_hooks(self):
         self._fwd_handle.remove()
-        self._bwd_handle.remove()
 
 
 @torch.no_grad()
