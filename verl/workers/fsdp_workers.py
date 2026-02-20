@@ -341,10 +341,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
 
-        # NOTE: force use_meta_tensor=False to avoid hangs with tie_word_embeddings=False models
-        # (e.g. Qwen3-8B). The trade-off is higher CPU memory during init (all ranks load full model).
+        # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=False, mesh=self.device_mesh
+            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
         )
 
         with init_context(), warnings.catch_warnings():

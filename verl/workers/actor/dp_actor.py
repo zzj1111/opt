@@ -31,7 +31,7 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
-from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_, fsdp_version as get_fsdp_version
+from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -134,20 +134,6 @@ def _get_layer_group(name):
     return "other"
 
 
-def _to_local(t):
-    """Convert DTensor to local shard; pass-through for regular tensors."""
-    if isinstance(t, DTensor):
-        return t.to_local()
-    return t
-
-
-def _full_tensor_float(t):
-    """full_tensor() for DTensor, or just .float() for regular tensor."""
-    if isinstance(t, DTensor):
-        return t.full_tensor().float()
-    return t.float()
-
-
 @torch.no_grad()
 def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     stats = {"global": {}, "last_layer": {}, "per_layer": {}}
@@ -159,10 +145,10 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     beta1, beta2 = pg.get('betas', (0.9, 0.999))
 
     # 2. 全局统计 + per-layer 统计
-    # Discover layer groups using model.named_parameters() (FSDP-aware)
-    # This ensures we see ALL parameters including tied weights that FSDP may split.
+    # Discover layer groups first
+    base_model = getattr(model, "module", model)
     layer_groups = {}  # group_name -> index
-    for name, _ in model.named_parameters():
+    for name, _ in base_model.named_parameters():
         group = _get_layer_group(name)
         if group not in layer_groups:
             layer_groups[group] = len(layer_groups)
@@ -184,9 +170,10 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     accum = torch.zeros(5, device=dev, dtype=torch.float64)
     per_layer_accum = torch.zeros(num_layers, 5, device=dev, dtype=torch.float64)
 
-    # Iterate over local shards (FSDP1). Each rank sees its own shard;
-    # we accumulate local shard norms then all_reduce to get global values.
-    for name, p in model.named_parameters():
+    # Build param->name mapping
+    param_to_name = {p: n for n, p in base_model.named_parameters()}
+
+    for p in model.parameters():
         w_sq = p.norm().pow(2)
         numel = p.numel()
         accum[0] += w_sq
@@ -213,14 +200,16 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 accum[3] += elr_sum
 
         # Per-layer accumulation
-        group = _get_layer_group(name)
-        idx = layer_idx.get(group, None)
-        if idx is not None:
-            per_layer_accum[idx, 0] += w_sq
-            per_layer_accum[idx, 1] += g_sq
-            per_layer_accum[idx, 2] += m_sq
-            per_layer_accum[idx, 3] += elr_sum
-            per_layer_accum[idx, 4] += numel
+        name = param_to_name.get(p, None)
+        if name is not None:
+            group = _get_layer_group(name)
+            idx = layer_idx.get(group, None)
+            if idx is not None:
+                per_layer_accum[idx, 0] += w_sq
+                per_layer_accum[idx, 1] += g_sq
+                per_layer_accum[idx, 2] += m_sq
+                per_layer_accum[idx, 3] += elr_sum
+                per_layer_accum[idx, 4] += numel
 
     # Single all_reduce for both global and per-layer
     combined = torch.cat([accum.unsqueeze(0), per_layer_accum], dim=0)  # [1+num_layers, 5]
@@ -247,14 +236,16 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
         stats["per_layer"]["m_norm"].append(per_layer_accum[i, 2].sqrt().item())
         stats["per_layer"]["eff_lr_mean"].append((per_layer_accum[i, 3] / n).item() if n > 0 else 0.0)
 
-    # 3. 最后一层 (LM_Head) — per-token analysis
+    # 3. 最后一层 (LM_Head) 
     lm_head = getattr(model, "get_output_embeddings", lambda: None)() or getattr(model, "lm_head", None)
     if lm_head is not None:
         shard_w = lm_head.weight
-        orig_grad = shard_w.grad
-
+        orig_grad = shard_w.grad # 备份
+        
+        # 内部工具：利用 FSDP 官方 summon 逻辑还原有序矩阵
         def get_ordered_full_matrix(state_key):
             if shard_w not in optimizer.state: return None
+            # 临时将状态存入 grad 位，利用 FSDP 索引图还原
             shard_w.grad = optimizer.state[shard_w][state_key].to(shard_w.dtype)
             full_matrix = None
             with FSDP.summon_full_params(model, with_grads=True):
@@ -262,6 +253,7 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                     full_matrix = lm_head.weight.grad.clone().float()
             return full_matrix
 
+        # A. 还原参数和梯度
         with FSDP.summon_full_params(model, with_grads=True):
             if rank == 0:
                 stats["last_layer"]["shape"] = list(lm_head.weight.shape)
@@ -269,20 +261,24 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 if lm_head.weight.grad is not None:
                     stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
 
+        # B. 还原有序的动量并计算正确的 EffLR
         full_m = get_ordered_full_matrix("exp_avg")
         full_v = get_ordered_full_matrix("exp_avg_sq")
+        
         if rank == 0 and full_m is not None and full_v is not None:
             step = optimizer.state[shard_w].get("step")
             if isinstance(step, torch.Tensor): step = step.float().mean().item()
             bc1, bc2 = 1 - beta1**step, 1 - beta2**step
+            
             full_v.sqrt_().div_(bc2**0.5).add_(eps)
             full_elr = (lr / bc1) / full_v
+            
             stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
             stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
             del full_m, full_v, full_elr
 
-        shard_w.grad = orig_grad
-
+        shard_w.grad = orig_grad # 还原现场
+        
     return stats
 
 @torch.no_grad()
@@ -1075,10 +1071,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         # --- 分析 1: Pre-Clip ---
         # 此时梯度是原始的，动量是旧的
-        stats_pre = get_fsdp_comprehensive_analysis(
-            self.actor_module, self.actor_optimizer)
+        stats_pre = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
         if dist.get_rank() == 0:
             print(f"\n[PRE-CLIP] Global Grad Norm: {stats_pre['global']['grad_norm']:.6f}")
+            # 如果需要，可以将 stats_pre 传给 wandb.log()
 
         # --- 梯度裁剪 ---
         if isinstance(self.actor_module, FSDP):
@@ -1092,6 +1088,7 @@ class DataParallelPPOActor(BasePPOActor):
             grad_norm = grad_norm.full_tensor()
 
         # --- 分析 2: Post-Clip ---
+        # 观察裁剪后的梯度范数
         if dist.get_rank() == 0:
             print(f"[POST-CLIP] Grad Norm: {float(grad_norm):.6f} (Target: {self.config.grad_clip})")
 
@@ -1106,15 +1103,17 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.step()
 
         # --- 分析 3: Post-Step ---
-        stats_after = get_fsdp_comprehensive_analysis(
-            self.actor_module, self.actor_optimizer)
+        # 此时动量（Momentum）和有效学习率（Effective LR）已经更新为当前步的值
+        stats_after = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
             print(f"[POST-STEP] Global Mean Effective LR: {stats_after['global']['eff_lr_mean']:.2e}")
+            # 最后一层第一个 token 的分析示例
             if "eff_lr_cls_mean" in stats_after["last_layer"]:
                 print(f"  LM_Head Class 0 EffLR: {stats_after['last_layer']['eff_lr_cls_mean'][0]:.2e}")
 
-        current_step = get_optimizer_step(self.actor_optimizer)
+
+        current_step=get_optimizer_step(self.actor_optimizer)
         analysis_save_dir = os.path.join(os.environ.get("VERL_DEFAULT_LOCAL_DIR", "./checkpoints"), "analysis_data")
         log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre)
 
@@ -1122,6 +1121,7 @@ class DataParallelPPOActor(BasePPOActor):
         analysis_metrics = {}
         for k, v in stats_after["global"].items():
             analysis_metrics[f"analysis/{k}"] = v
+        # pre-clip 的原始梯度范数也一并记录
         for k, v in stats_pre["global"].items():
             analysis_metrics[f"analysis/pre_clip_{k}"] = v
 
