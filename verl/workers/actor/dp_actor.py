@@ -134,6 +134,113 @@ def _get_layer_group(name):
     return "other"
 
 
+class LMHeadGradTracker:
+    """Capture the true lm_head gradient via module hooks, bypassing FSDP's
+    reduce-scatter which corrupts tied-weight gradients.
+
+    Maintains its own Adam exp_avg / exp_avg_sq (on CPU, rank-0 only) so that
+    per-token effective LR can be computed correctly.
+
+    Memory overhead (rank 0, CPU):
+        2 x [vocab_size, hidden_size] x float32
+        e.g. Qwen3-1.7B: 2 x 151936 x 2048 x 4 ≈ 2.4 GB CPU RAM
+    Memory overhead (all ranks, GPU, temporary):
+        1 x [vocab_size, hidden_size] x float32 during finalize_step
+    """
+
+    def __init__(self, lm_head_module):
+        self.saved_input = None
+        self.grad_accum = None       # [V, H] float32, GPU, accumulated across micro-batches
+        self.step_count = 0
+        self.exp_avg = None          # [V, H] float32, CPU, rank 0 only
+        self.exp_avg_sq = None       # [V, H] float32, CPU, rank 0 only
+
+        self._fwd_handle = lm_head_module.register_forward_hook(self._fwd_hook)
+        self._bwd_handle = lm_head_module.register_full_backward_hook(self._bwd_hook)
+
+    # ------------------------------------------------------------------
+    def _fwd_hook(self, module, input, output):
+        # Only save during training (eval / no_grad → skip)
+        if module.training and torch.is_grad_enabled():
+            self.saved_input = input[0].detach()
+
+    def _bwd_hook(self, module, grad_input, grad_output):
+        if self.saved_input is None:
+            return
+        # grad_output[0]: [..., V]  gradient of loss w.r.t. logits
+        # saved_input:     [..., H]  hidden states entering lm_head
+        go = grad_output[0].detach().float().reshape(-1, grad_output[0].shape[-1])  # [N, V]
+        inp = self.saved_input.float().reshape(-1, self.saved_input.shape[-1])       # [N, H]
+        local_grad = go.t() @ inp                                                    # [V, H]
+
+        if self.grad_accum is None:
+            self.grad_accum = local_grad
+        else:
+            self.grad_accum += local_grad
+
+        self.saved_input = None  # free GPU memory
+
+    # ------------------------------------------------------------------
+    def finalize_step(self, optimizer_pg, clip_ratio=1.0):
+        """Call after grad-clip, before optimizer.step().
+
+        Args:
+            optimizer_pg: optimizer.param_groups[0] (current hyper-params)
+            clip_ratio:   min(1, max_norm / pre_clip_norm) applied to match clipping
+
+        Returns:
+            dict with per-token stats (rank 0), empty dict (other ranks).
+        """
+        rank = dist.get_rank()
+
+        if self.grad_accum is None:
+            return {}
+
+        # Reduce local gradients → rank 0  (collective, all ranks must call)
+        dist.reduce(self.grad_accum, dst=0, op=dist.ReduceOp.SUM)
+
+        stats = {}
+        if rank == 0:
+            lr   = optimizer_pg["lr"]
+            eps  = optimizer_pg["eps"]
+            beta1, beta2 = optimizer_pg.get("betas", (0.9, 0.999))
+
+            # Move to CPU and apply the same clip ratio the optimizer saw
+            full_grad = self.grad_accum.cpu().float() * clip_ratio
+            self.step_count += 1
+
+            # --- per-token gradient norm ---
+            stats["g_norm"] = full_grad.norm(dim=1).tolist()
+            stats["shape"]  = list(full_grad.shape)
+
+            # --- update manual Adam states ---
+            if self.exp_avg is None:
+                self.exp_avg    = torch.zeros_like(full_grad)
+                self.exp_avg_sq = torch.zeros_like(full_grad)
+
+            self.exp_avg.mul_(beta1).add_(full_grad, alpha=1 - beta1)
+            self.exp_avg_sq.mul_(beta2).addcmul_(full_grad, full_grad, value=1 - beta2)
+
+            # --- per-token momentum norm ---
+            stats["mom_cls_norm"] = self.exp_avg.norm(dim=1).tolist()
+
+            # --- per-token effective LR ---
+            bc1 = 1 - beta1 ** self.step_count
+            bc2 = 1 - beta2 ** self.step_count
+            denom = (self.exp_avg_sq.sqrt() / (bc2 ** 0.5)).add_(eps)
+            eff_lr = lr / bc1 / denom
+            stats["eff_lr_cls_mean"] = eff_lr.mean(dim=1).tolist()
+
+            del full_grad
+
+        self.grad_accum = None  # reset for next step (all ranks)
+        return stats
+
+    def remove_hooks(self):
+        self._fwd_handle.remove()
+        self._bwd_handle.remove()
+
+
 @torch.no_grad()
 def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     stats = {"global": {}, "last_layer": {}, "per_layer": {}}
@@ -771,6 +878,18 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             self.scaler = None
 
+        # --- LM-Head gradient tracker (actor only) ---
+        self._lm_head_tracker = None
+        if actor_optimizer is not None:
+            base = _unwrap_model(actor_module)
+            lm_head_mod = getattr(base, "get_output_embeddings", lambda: None)()
+            if lm_head_mod is None:
+                lm_head_mod = getattr(base, "lm_head", None)
+            if lm_head_mod is not None:
+                self._lm_head_tracker = LMHeadGradTracker(lm_head_mod)
+                if torch.distributed.get_rank() == 0:
+                    print(f"[Actor] LMHeadGradTracker registered on {lm_head_mod.__class__.__name__}")
+
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1088,9 +1207,17 @@ class DataParallelPPOActor(BasePPOActor):
             grad_norm = grad_norm.full_tensor()
 
         # --- 分析 2: Post-Clip ---
-        # 观察裁剪后的梯度范数
         if dist.get_rank() == 0:
             print(f"[POST-CLIP] Grad Norm: {float(grad_norm):.6f} (Target: {self.config.grad_clip})")
+
+        # --- LM-Head tracker: finalize with same clip ratio as optimizer ---
+        lm_head_stats = {}
+        if self._lm_head_tracker is not None:
+            clip_ratio = min(1.0, self.config.grad_clip / max(float(grad_norm), 1e-8))
+            lm_head_stats = self._lm_head_tracker.finalize_step(
+                optimizer_pg=self.actor_optimizer.param_groups[0],
+                clip_ratio=clip_ratio,
+            )
 
         # --- 执行更新 ---
         if self.scaler is not None:
@@ -1103,12 +1230,19 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.step()
 
         # --- 分析 3: Post-Step ---
-        # 此时动量（Momentum）和有效学习率（Effective LR）已经更新为当前步的值
         stats_after = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
+
+        # Overwrite last_layer grad/mom/eff_lr with tracker's correct values
+        # (keep p_norm from summon_full_params which is correct)
+        if lm_head_stats:
+            p_norm = stats_after["last_layer"].get("p_norm")
+            stats_after["last_layer"].update(lm_head_stats)
+            if p_norm is not None:
+                stats_after["last_layer"]["p_norm"] = p_norm
+
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
             print(f"[POST-STEP] Global Mean Effective LR: {stats_after['global']['eff_lr_mean']:.2e}")
-            # 最后一层第一个 token 的分析示例
             if "eff_lr_cls_mean" in stats_after["last_layer"]:
                 print(f"  LM_Head Class 0 EffLR: {stats_after['last_layer']['eff_lr_cls_mean'][0]:.2e}")
 
