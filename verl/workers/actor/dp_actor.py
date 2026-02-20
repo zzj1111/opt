@@ -134,8 +134,100 @@ def _get_layer_group(name):
     return "other"
 
 
+class LMHeadGradTracker:
+    """Capture the true lm_head gradient via hooks, bypassing FSDP tied-weight issues.
+
+    With FSDP + weight tying (tie_word_embeddings=True), p.grad on the shared
+    embed_tokens/lm_head parameter loses the lm_head contribution after
+    reduce-scatter.  This class registers forward/backward hooks on the lm_head
+    module to capture its gradient independently:
+
+        Forward hook:  saves hidden states (input to lm_head)
+        Backward hook: computes grad_W = grad_output^T @ hidden, accumulates
+                       across micro-batches
+
+    After all micro-batches, call ``get_grad_norms()`` to all-reduce across
+    FSDP ranks and return the correct gradient norms.
+    """
+
+    def __init__(self, model: torch.nn.Module):
+        self._saved_input = None
+        self._grad_accum = None          # [V, H] accumulated across micro-batches
+        self._cached_result = None       # cached (total_norm, per_token_norms)
+        self._handles: list = []
+        self._enabled = False
+
+        base = _unwrap_model(model)
+        lm_head = getattr(base, "lm_head", None)
+        if lm_head is None:
+            return
+
+        # Only needed when weight tying is active
+        tied = False
+        inp_emb = getattr(base, "get_input_embeddings", lambda: None)()
+        if inp_emb is not None and hasattr(inp_emb, "weight") and hasattr(lm_head, "weight"):
+            tied = inp_emb.weight is lm_head.weight or inp_emb.weight.data_ptr() == lm_head.weight.data_ptr()
+        if not tied:
+            return
+
+        self._handles.append(lm_head.register_forward_hook(self._fwd_hook))
+        self._handles.append(lm_head.register_full_backward_hook(self._bwd_hook))
+        self._enabled = True
+
+    # ---- hooks ----
+    def _fwd_hook(self, module, inp, out):
+        # inp[0]: [B, S, H]  – hidden states fed to lm_head
+        self._saved_input = inp[0].detach()
+
+    def _bwd_hook(self, module, grad_input, grad_output):
+        if self._saved_input is None:
+            return
+        go = grad_output[0]               # [B, S, V]
+        h  = self._saved_input             # [B, S, H]
+        V  = go.shape[-1]
+        H  = h.shape[-1]
+        # grad_W = grad_output^T @ hidden  →  [V, H]
+        grad_W = go.reshape(-1, V).T @ h.reshape(-1, H)
+        if self._grad_accum is None:
+            self._grad_accum = grad_W.float()
+        else:
+            self._grad_accum += grad_W.float()
+        self._saved_input = None           # free memory
+
+    # ---- public API ----
+    @torch.no_grad()
+    def get_grad_norms(self):
+        """All-reduce the accumulated gradient and return (total_norm, per_token_norms).
+
+        Results are cached: the all-reduce only happens on the first call after
+        ``reset()``.  Subsequent calls return the cached values.
+        Returns ``(None, None)`` if hooks never fired.
+        """
+        if self._cached_result is not None:
+            return self._cached_result
+        if self._grad_accum is None:
+            return None, None
+        # Sum gradient across all FSDP / DP ranks
+        dist.all_reduce(self._grad_accum, op=dist.ReduceOp.SUM)
+        per_token_norms = self._grad_accum.norm(dim=1)     # [V]
+        total_norm      = self._grad_accum.norm().item()    # scalar
+        self._cached_result = (total_norm, per_token_norms)
+        return self._cached_result
+
+    def reset(self):
+        """Call at zero_grad() time to clear the accumulator."""
+        self._saved_input = None
+        self._grad_accum = None
+        self._cached_result = None
+
+    def remove(self):
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()
+
+
 @torch.no_grad()
-def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
+def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False, lm_head_grad_tracker=None):
     stats = {"global": {}, "last_layer": {}, "per_layer": {}}
     rank = dist.get_rank()
 
@@ -222,6 +314,12 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     stats["global"]["mom_norm"] = (accum[2] / (accum[4] if rms_norm else 1.0)).sqrt().item()
     stats["global"]["eff_lr_mean"] = (accum[3] / g_num).item()
 
+    # --- Obtain correct lm_head gradient from hook tracker (if available) ---
+    hook_total_norm = None     # scalar: ||grad_W_lm_head||_F
+    hook_per_token  = None     # [V] tensor: per-token gradient norms
+    if lm_head_grad_tracker is not None and lm_head_grad_tracker._enabled:
+        hook_total_norm, hook_per_token = lm_head_grad_tracker.get_grad_norms()
+
     # Per-layer stats
     stats["per_layer"]["layer_names"] = sorted_names
     stats["per_layer"]["w_norm"] = []
@@ -231,16 +329,21 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     for i in range(num_layers):
         n = per_layer_accum[i, 4].item()
         stats["per_layer"]["w_norm"].append(per_layer_accum[i, 0].sqrt().item())
-        stats["per_layer"]["g_norm"].append(per_layer_accum[i, 1].sqrt().item())
         stats["per_layer"]["m_norm"].append(per_layer_accum[i, 2].sqrt().item())
         stats["per_layer"]["eff_lr_mean"].append((per_layer_accum[i, 3] / n).item() if n > 0 else 0.0)
+        # For embed_tokens with weight tying: use hook-captured lm_head gradient
+        layer_name = sorted_names[i]
+        if hook_total_norm is not None and layer_name == "embed_tokens":
+            stats["per_layer"]["g_norm"].append(hook_total_norm)
+        else:
+            stats["per_layer"]["g_norm"].append(per_layer_accum[i, 1].sqrt().item())
 
-    # 3. 最后一层 (LM_Head) 
+    # 3. 最后一层 (LM_Head)
     lm_head = getattr(model, "get_output_embeddings", lambda: None)() or getattr(model, "lm_head", None)
     if lm_head is not None:
         shard_w = lm_head.weight
         orig_grad = shard_w.grad # 备份
-        
+
         # 内部工具：利用 FSDP 官方 summon 逻辑还原有序矩阵
         def get_ordered_full_matrix(state_key):
             if shard_w not in optimizer.state: return None
@@ -257,7 +360,10 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
             if rank == 0:
                 stats["last_layer"]["shape"] = list(lm_head.weight.shape)
                 stats["last_layer"]["p_norm"] = lm_head.weight.norm(dim=1).cpu().tolist()
-                if lm_head.weight.grad is not None:
+                if hook_per_token is not None:
+                    # Use hook-captured per-token gradient (correct for tied weights)
+                    stats["last_layer"]["g_norm"] = hook_per_token.cpu().tolist()
+                elif lm_head.weight.grad is not None:
                     stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
 
         # B. 还原有序的动量并计算正确的 EffLR
@@ -739,6 +845,8 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        # Track lm_head gradient via hooks (fixes FSDP tied-weight gradient loss)
+        self.lm_head_grad_tracker = LMHeadGradTracker(actor_module) if actor_optimizer is not None else None
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -1070,7 +1178,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         # --- 分析 1: Pre-Clip ---
         # 此时梯度是原始的，动量是旧的
-        stats_pre = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
+        # Pass lm_head_grad_tracker to get correct gradient for tied weights (pre-clip)
+        stats_pre = get_fsdp_comprehensive_analysis(
+            self.actor_module, self.actor_optimizer,
+            lm_head_grad_tracker=self.lm_head_grad_tracker)
         if dist.get_rank() == 0:
             print(f"\n[PRE-CLIP] Global Grad Norm: {stats_pre['global']['grad_norm']:.6f}")
             # 如果需要，可以将 stats_pre 传给 wandb.log()
@@ -1103,7 +1214,10 @@ class DataParallelPPOActor(BasePPOActor):
 
         # --- 分析 3: Post-Step ---
         # 此时动量（Momentum）和有效学习率（Effective LR）已经更新为当前步的值
-        stats_after = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
+        # Also pass lm_head_grad_tracker for last_layer per-token g_norm (Figure 10)
+        stats_after = get_fsdp_comprehensive_analysis(
+            self.actor_module, self.actor_optimizer,
+            lm_head_grad_tracker=self.lm_head_grad_tracker)
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
             print(f"[POST-STEP] Global Mean Effective LR: {stats_after['global']['eff_lr_mean']:.2e}")
@@ -1239,6 +1353,8 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
+                if self.lm_head_grad_tracker is not None:
+                    self.lm_head_grad_tracker.reset()
 
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
