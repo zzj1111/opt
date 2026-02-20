@@ -93,6 +93,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$MODEL \
+    +actor_rollout_ref.model.override_config.tie_word_embeddings=False \
     actor_rollout_ref.actor.optim.lr=$LR \
     actor_rollout_ref.actor.optim.betas="[$BETA1,$BETA2]" \
     actor_rollout_ref.model.use_remove_padding=True \
