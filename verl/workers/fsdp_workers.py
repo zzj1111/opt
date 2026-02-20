@@ -404,19 +404,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
 
-            # Manually untie lm_head from embed_tokens so FSDP treats them as
-            # independent parameters. This prevents lm_head's dense gradient from
-            # being overwritten by embed_tokens' sparse gradient during reduce-scatter.
-            # We keep tie_word_embeddings=True in the config so use_meta_tensor stays False.
-            if actor_model_config.tie_word_embeddings and role == "actor":
-                lm_head = getattr(actor_module, "lm_head", None)
-                embed = getattr(actor_module.model, "embed_tokens", None) if hasattr(actor_module, "model") else None
-                if lm_head is not None and embed is not None and lm_head.weight.data_ptr() == embed.weight.data_ptr():
-                    lm_head.weight = torch.nn.Parameter(lm_head.weight.clone())
-                    if self.rank == 0:
-                        print(f"[{role}] Untied lm_head.weight from embed_tokens.weight "
-                              f"(lm_head={lm_head.weight.data_ptr()}, embed={embed.weight.data_ptr()})")
-
             if enable_gradient_checkpointing:
                 actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
