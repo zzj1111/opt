@@ -153,6 +153,13 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     stats = {"global": {}, "last_layer": {}, "per_layer": {}}
     rank = dist.get_rank()
 
+    # DEBUG: skip entire analysis under FSDP2 to isolate hang
+    fsdp_ver = get_fsdp_version(model)
+    if fsdp_ver == 2:
+        if rank == 0:
+            print("[DEBUG] Skipping get_fsdp_comprehensive_analysis entirely for FSDP2")
+        return stats
+
     # 1. 获取优化器超参数
     pg = optimizer.param_groups[0]
     lr, eps = pg['lr'], pg['eps']
@@ -1089,9 +1096,8 @@ class DataParallelPPOActor(BasePPOActor):
         # 此时梯度是原始的，动量是旧的
         stats_pre = get_fsdp_comprehensive_analysis(
             self.actor_module, self.actor_optimizer)
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and stats_pre["global"]:
             print(f"\n[PRE-CLIP] Global Grad Norm: {stats_pre['global']['grad_norm']:.6f}")
-            # 如果需要，可以将 stats_pre 传给 wandb.log()
 
         # --- 梯度裁剪 ---
         if isinstance(self.actor_module, FSDP):
@@ -1105,7 +1111,6 @@ class DataParallelPPOActor(BasePPOActor):
             grad_norm = grad_norm.full_tensor()
 
         # --- 分析 2: Post-Clip ---
-        # 观察裁剪后的梯度范数
         if dist.get_rank() == 0:
             print(f"[POST-CLIP] Grad Norm: {float(grad_norm):.6f} (Target: {self.config.grad_clip})")
 
@@ -1120,26 +1125,23 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.step()
 
         # --- 分析 3: Post-Step ---
-        # 此时动量（Momentum）和有效学习率（Effective LR）已经更新为当前步的值
         stats_after = get_fsdp_comprehensive_analysis(
             self.actor_module, self.actor_optimizer)
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and stats_after["global"]:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
             print(f"[POST-STEP] Global Mean Effective LR: {stats_after['global']['eff_lr_mean']:.2e}")
-            # 最后一层第一个 token 的分析示例
             if "eff_lr_cls_mean" in stats_after["last_layer"]:
                 print(f"  LM_Head Class 0 EffLR: {stats_after['last_layer']['eff_lr_cls_mean'][0]:.2e}")
 
-
-        current_step=get_optimizer_step(self.actor_optimizer)
+        current_step = get_optimizer_step(self.actor_optimizer)
         analysis_save_dir = os.path.join(os.environ.get("VERL_DEFAULT_LOCAL_DIR", "./checkpoints"), "analysis_data")
-        log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre)
+        if stats_after["global"]:
+            log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre)
 
         # 将 global 标量通过 metrics 管道回传给 trainer，最终写入 wandb
         analysis_metrics = {}
         for k, v in stats_after["global"].items():
             analysis_metrics[f"analysis/{k}"] = v
-        # pre-clip 的原始梯度范数也一并记录
         for k, v in stats_pre["global"].items():
             analysis_metrics[f"analysis/pre_clip_{k}"] = v
 
