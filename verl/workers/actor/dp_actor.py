@@ -202,9 +202,8 @@ class LMHeadGradTracker:
 
         stats = {}
         if rank == 0:
-            lr   = optimizer_pg["lr"]
-            eps  = optimizer_pg["eps"]
-            beta1, beta2 = optimizer_pg.get("betas", (0.9, 0.999))
+            lr = optimizer_pg["lr"]
+            is_adam = "betas" in optimizer_pg
 
             # Move to CPU and apply the same clip ratio the optimizer saw
             full_grad = self.grad_accum.cpu().float() * clip_ratio
@@ -214,29 +213,53 @@ class LMHeadGradTracker:
             stats["g_norm"] = full_grad.norm(dim=1).tolist()
             stats["shape"]  = list(full_grad.shape)
 
-            # --- update manual Adam states ---
-            if self.exp_avg is None:
-                self.exp_avg    = torch.zeros_like(full_grad)
-                self.exp_avg_sq = torch.zeros_like(full_grad)
+            if is_adam:
+                eps = optimizer_pg.get("eps", 1e-8)
+                beta1, beta2 = optimizer_pg["betas"]
 
-            self.exp_avg.mul_(beta1).add_(full_grad, alpha=1 - beta1)
-            self.exp_avg_sq.mul_(beta2).addcmul_(full_grad, full_grad, value=1 - beta2)
+                # --- update manual Adam states ---
+                if self.exp_avg is None:
+                    self.exp_avg    = torch.zeros_like(full_grad)
+                    self.exp_avg_sq = torch.zeros_like(full_grad)
 
-            # --- per-token momentum norm ---
-            stats["mom_cls_norm"] = self.exp_avg.norm(dim=1).tolist()
+                self.exp_avg.mul_(beta1).add_(full_grad, alpha=1 - beta1)
+                self.exp_avg_sq.mul_(beta2).addcmul_(full_grad, full_grad, value=1 - beta2)
 
-            # --- per-token effective LR ---
-            bc1 = 1 - beta1 ** self.step_count
-            bc2 = 1 - beta2 ** self.step_count
-            denom = (self.exp_avg_sq.sqrt() / (bc2 ** 0.5)).add_(eps)
-            eff_lr = lr / bc1 / denom
-            stats["eff_lr_cls_mean"] = eff_lr.mean(dim=1).tolist()
+                # --- per-token momentum norm ---
+                stats["mom_cls_norm"] = self.exp_avg.norm(dim=1).tolist()
 
-            # --- aggregate stats for per-layer injection ---
-            stats["agg_g_norm"] = full_grad.norm().item()
-            stats["agg_m_norm"] = self.exp_avg.norm().item()
-            stats["agg_eff_lr_mean"] = eff_lr.mean().item()
-            stats["agg_numel"] = full_grad.numel()
+                # --- per-token effective LR ---
+                bc1 = 1 - beta1 ** self.step_count
+                bc2 = 1 - beta2 ** self.step_count
+                denom = (self.exp_avg_sq.sqrt() / (bc2 ** 0.5)).add_(eps)
+                eff_lr = lr / bc1 / denom
+                stats["eff_lr_cls_mean"] = eff_lr.mean(dim=1).tolist()
+
+                # --- aggregate ---
+                stats["agg_g_norm"] = full_grad.norm().item()
+                stats["agg_m_norm"] = self.exp_avg.norm().item()
+                stats["agg_eff_lr_mean"] = eff_lr.mean().item()
+                stats["agg_numel"] = full_grad.numel()
+            else:
+                # SGD (with optional momentum)
+                mu = optimizer_pg.get("momentum", 0.0)
+
+                if mu > 0:
+                    if self.exp_avg is None:
+                        self.exp_avg = torch.zeros_like(full_grad)
+                    # SGD momentum: buf = mu * buf + grad
+                    self.exp_avg.mul_(mu).add_(full_grad)
+                    stats["mom_cls_norm"] = self.exp_avg.norm(dim=1).tolist()
+                    stats["agg_m_norm"] = self.exp_avg.norm().item()
+                else:
+                    stats["mom_cls_norm"] = [0.0] * full_grad.shape[0]
+                    stats["agg_m_norm"] = 0.0
+
+                # SGD effective LR is constant for all tokens
+                stats["eff_lr_cls_mean"] = [lr] * full_grad.shape[0]
+                stats["agg_g_norm"] = full_grad.norm().item()
+                stats["agg_eff_lr_mean"] = lr
+                stats["agg_numel"] = full_grad.numel()
 
             del full_grad
 
@@ -254,8 +277,10 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
 
     # 1. 获取优化器超参数
     pg = optimizer.param_groups[0]
-    lr, eps = pg['lr'], pg['eps']
-    beta1, beta2 = pg.get('betas', (0.9, 0.999))
+    lr = pg['lr']
+    eps = pg.get('eps', 1e-8)
+    beta1, beta2 = pg.get('betas', (0.0, 0.0))
+    is_adam = 'betas' in pg  # Adam-family vs SGD-family
 
     # 2. 全局统计 + per-layer 统计
     # Discover layer groups first
@@ -301,7 +326,7 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
         elr_sum = torch.tensor(0.0, device=dev, dtype=torch.float64)
         if p in optimizer.state:
             st = optimizer.state[p]
-            if "exp_avg" in st and "exp_avg_sq" in st:
+            if is_adam and "exp_avg" in st and "exp_avg_sq" in st:
                 step = st.get("step")
                 if isinstance(step, torch.Tensor): step = step.float().mean().item()
                 bias_c1 = 1 - beta1 ** step
@@ -310,6 +335,12 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 accum[2] += m_sq
                 denom = (st["exp_avg_sq"].sqrt() / (bias_c2**0.5)).add_(eps)
                 elr_sum = (lr / bias_c1 / denom).sum()
+                accum[3] += elr_sum
+            elif not is_adam and "momentum_buffer" in st:
+                m_sq = st["momentum_buffer"].norm().pow(2)
+                accum[2] += m_sq
+                # SGD effective LR is constant = lr for every element
+                elr_sum = lr * numel
                 accum[3] += elr_sum
 
         # Per-layer accumulation
@@ -375,20 +406,28 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                     stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
 
         # B. 还原有序的动量并计算正确的 EffLR
-        full_m = get_ordered_full_matrix("exp_avg")
-        full_v = get_ordered_full_matrix("exp_avg_sq")
-        
-        if rank == 0 and full_m is not None and full_v is not None:
-            step = optimizer.state[shard_w].get("step")
-            if isinstance(step, torch.Tensor): step = step.float().mean().item()
-            bc1, bc2 = 1 - beta1**step, 1 - beta2**step
-            
-            full_v.sqrt_().div_(bc2**0.5).add_(eps)
-            full_elr = (lr / bc1) / full_v
-            
-            stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
-            stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
-            del full_m, full_v, full_elr
+        if is_adam:
+            full_m = get_ordered_full_matrix("exp_avg")
+            full_v = get_ordered_full_matrix("exp_avg_sq")
+
+            if rank == 0 and full_m is not None and full_v is not None:
+                step = optimizer.state[shard_w].get("step")
+                if isinstance(step, torch.Tensor): step = step.float().mean().item()
+                bc1, bc2 = 1 - beta1**step, 1 - beta2**step
+
+                full_v.sqrt_().div_(bc2**0.5).add_(eps)
+                full_elr = (lr / bc1) / full_v
+
+                stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
+                stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
+                del full_m, full_v, full_elr
+        else:
+            full_m = get_ordered_full_matrix("momentum_buffer")
+            if rank == 0 and full_m is not None:
+                stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
+                # SGD: effective LR is constant for all tokens
+                stats["last_layer"]["eff_lr_cls_mean"] = [lr] * full_m.shape[0]
+                del full_m
 
         shard_w.grad = orig_grad # 还原现场
         
@@ -534,7 +573,7 @@ def compute_grad_momentum_norms_fsdp_safe(
     return out
 
 
-def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plot_every=10):
+def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plot_every=10, token_freq=None):
     """
     功能：
     1. 将 stats['global']（及 stats_pre['global']）按梯度步追加到 JSONL 文件
@@ -570,6 +609,9 @@ def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plo
                     save_payload[k] = torch.tensor(v, dtype=torch.float32)
                 else:
                     save_payload[k] = v
+            # Include token frequency from this mini-batch
+            if token_freq is not None:
+                save_payload["token_freq"] = token_freq.long()
             torch.save(save_payload, file_path)
 
         # --- B2. Per-layer metrics to JSONL ---
@@ -802,10 +844,16 @@ def _plot_per_layer_eff_lr(pl_jsonl_path, save_dir):
 
 
 def _plot_token_class_sg_norm(step, save_dir):
-    """Figure 10: Per-token-class stochastic gradient norm at the output layer."""
+    """Per-token-class SG norm scatter: token frequency (x) vs SG norm (y).
+
+    Plots ALL vocab tokens.  Tokens that never appeared in the mini-batch
+    (freq=0) are shown at x=0.  Both axes use log scale (freq axis uses
+    log(1+count) so zero-count tokens are visible at x=0).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import numpy as np
 
     pt_path = os.path.join(save_dir, f"layer_stats_step_{step:05d}.pt")
     if not os.path.exists(pt_path):
@@ -815,24 +863,57 @@ def _plot_token_class_sg_norm(step, save_dir):
     if "g_norm" not in data:
         return
 
-    g_norm = data["g_norm"]
-    # Show first 1000 token classes (or fewer if vocab is smaller)
-    n_tokens = min(1000, len(g_norm))
-    g_norm = g_norm[:n_tokens]
+    g_norm = data["g_norm"].numpy()                       # [V]
+    vocab_size = len(g_norm)
+
+    # Token frequency: may be shorter than vocab_size (pad with 0)
+    if "token_freq" in data:
+        freq = data["token_freq"].numpy().astype(np.float64)
+        if len(freq) < vocab_size:
+            freq = np.pad(freq, (0, vocab_size - len(freq)))
+        elif len(freq) > vocab_size:
+            freq = freq[:vocab_size]
+    else:
+        # Fallback: use token ID as x-axis if no frequency data
+        freq = np.arange(vocab_size, dtype=np.float64)
 
     plot_dir = os.path.join(save_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(14, 5))
-    ax.scatter(range(n_tokens), g_norm.numpy(), s=2, alpha=0.6, color="tab:purple")
-    ax.set_xlabel("Token ID (Token i)")
-    ax.set_ylabel(r"SG Norm $\|g_i\|_2$")
-    ax.set_title(f"Output Layer Token-wise SG Norm at Iteration {step}")
+    # --- Scatter: frequency vs SG norm (all tokens) ---
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Separate tokens that appeared (freq>0) from those that didn't
+    appeared = freq > 0
+    n_appeared = appeared.sum()
+    n_absent = (~appeared).sum()
+
+    # Plot appeared tokens
+    if n_appeared > 0:
+        ax.scatter(
+            freq[appeared], g_norm[appeared],
+            s=1, alpha=0.3, color="tab:blue", rasterized=True,
+            label=f"appeared ({n_appeared})",
+        )
+    # Plot absent tokens at x=0 with a different color
+    if n_absent > 0:
+        # Jitter x slightly so they don't all stack at exactly 0
+        ax.scatter(
+            np.full(n_absent, 0.5), g_norm[~appeared],
+            s=1, alpha=0.1, color="tab:red", rasterized=True,
+            label=f"absent ({n_absent})",
+        )
+
+    ax.set_xscale("symlog", linthresh=1)
     ax.set_yscale("log")
+    ax.set_xlabel("Token Frequency in Mini-batch")
+    ax.set_ylabel(r"SG Norm $\|g_i\|_2$")
+    ax.set_title(f"Token Frequency vs SG Norm — Step {step}  (V={vocab_size})")
+    ax.legend(fontsize=8, markerscale=5)
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, f"token_class_sg_norm_step_{step:05d}.png"), dpi=150)
+    fig.savefig(os.path.join(plot_dir, f"token_freq_vs_sg_norm_step_{step:05d}.png"), dpi=150)
     plt.close(fig)
 
 
@@ -1189,7 +1270,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     #         return grad_norm
 
-    def _optimizer_step(self):
+    def _optimizer_step(self, token_freq=None):
         assert self.config.grad_clip is not None
         if self.scaler is not None:
             self.scaler.unscale_(self.actor_optimizer)
@@ -1265,9 +1346,15 @@ class DataParallelPPOActor(BasePPOActor):
                 print(f"  LM_Head Class 0 EffLR: {stats_after['last_layer']['eff_lr_cls_mean'][0]:.2e}")
 
 
+        # All-reduce token frequency across ranks so it matches the global gradient
+        if token_freq is not None and dist.is_initialized():
+            token_freq = token_freq.to(get_device_id())
+            dist.all_reduce(token_freq, op=dist.ReduceOp.SUM)
+            token_freq = token_freq.cpu()
+
         current_step=get_optimizer_step(self.actor_optimizer)
         analysis_save_dir = os.path.join(os.environ.get("VERL_DEFAULT_LOCAL_DIR", "./checkpoints"), "analysis_data")
-        log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre)
+        log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre, token_freq=token_freq)
 
         # 将 global 标量通过 metrics 管道回传给 trainer，最终写入 wandb
         analysis_metrics = {}
@@ -1393,10 +1480,32 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
+                # Accumulate token frequency across micro-batches for analysis
+                _token_freq_accum = None
+
                 for micro_batch in micro_batches:
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+
+                    # Count token occurrences for frequency-vs-SG-norm analysis
+                    if "input_ids" in model_inputs:
+                        ids = model_inputs["input_ids"].detach().reshape(-1)
+                        if _token_freq_accum is None:
+                            # lazy init: vocab size unknown, use bincount
+                            _token_freq_accum = torch.bincount(ids.cpu().long())
+                        else:
+                            bc = torch.bincount(ids.cpu().long(), minlength=len(_token_freq_accum))
+                            if bc.shape[0] > _token_freq_accum.shape[0]:
+                                _token_freq_accum = torch.nn.functional.pad(
+                                    _token_freq_accum, (0, bc.shape[0] - _token_freq_accum.shape[0])
+                                )
+                            elif _token_freq_accum.shape[0] > bc.shape[0]:
+                                bc = torch.nn.functional.pad(
+                                    bc, (0, _token_freq_accum.shape[0] - bc.shape[0])
+                                )
+                            _token_freq_accum += bc
+
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
@@ -1494,7 +1603,7 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
-                grad_norm, analysis_metrics = self._optimizer_step()
+                grad_norm, analysis_metrics = self._optimizer_step(token_freq=_token_freq_accum)
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 mini_batch_metrics.update(analysis_metrics)
                 append_to_dict(metrics, mini_batch_metrics)

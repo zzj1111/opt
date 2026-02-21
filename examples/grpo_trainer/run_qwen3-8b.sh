@@ -15,6 +15,9 @@ ROUND=""
 NOTE=""
 GPUS="0,1,2,3"
 MODEL="Qwen/Qwen3-1.7B"
+OPTIM="adamw"   # "adamw" or "sgd"
+MOMENTUM=0.9    # only used when OPTIM=sgd
+CKPT_ROOT="checkpoints"  # parent dir for experiment folders
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -25,6 +28,9 @@ while [[ $# -gt 0 ]]; do
         --note) NOTE="$2"; shift 2 ;;
         --gpus) GPUS="$2"; shift 2 ;;
         --model) MODEL="$2"; shift 2 ;;
+        --optim) OPTIM="$2"; shift 2 ;;
+        --momentum) MOMENTUM="$2"; shift 2 ;;
+        --ckpt-root) CKPT_ROOT="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -35,69 +41,83 @@ MODEL_SHORT=$(basename "$MODEL")
 # Count number of GPUs from comma-separated list
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 
-# Auto-generate experiment name: date_round_beta1_beta2_lr[_note]
+# Auto-generate experiment name
 DATE=$(date +%m%d)
+
+# Build optimizer suffix for experiment name
+if [[ "$OPTIM" == "sgd" ]]; then
+    OPTIM_TAG="sgd_mu${MOMENTUM}"
+else
+    OPTIM_TAG="b1${BETA1}_b2${BETA2}"
+fi
 
 # Auto-increment round: use mkdir as atomic lock to avoid conflicts
 if [[ -z "$ROUND" ]]; then
     ROUND=1
     while true; do
-        EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
+        EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_${OPTIM_TAG}_lr${LR}"
         if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
         # mkdir fails if dir already exists, acting as an atomic claim
-        if mkdir -p "checkpoints" && mkdir "checkpoints/$EXP_NAME" 2>/dev/null; then
+        if mkdir -p "$CKPT_ROOT" && mkdir "$CKPT_ROOT/$EXP_NAME" 2>/dev/null; then
             break
         fi
         ROUND=$((ROUND + 1))
     done
 else
-    EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_b1${BETA1}_b2${BETA2}_lr${LR}"
+    EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_${OPTIM_TAG}_lr${LR}"
     if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
-    mkdir -p "checkpoints/$EXP_NAME"
+    mkdir -p "$CKPT_ROOT/$EXP_NAME"
 fi
 
 # If not inside tmux, launch a tmux session and re-run this script inside it
-if [[ -z "$TMUX" ]]; then
-    TMUX_SESSION="train_${EXP_NAME}"
-    # Build the full command to re-run inside tmux
-    ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL"
-    if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
-    for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
+# if [[ -z "$TMUX" ]]; then
+#     TMUX_SESSION="train_${EXP_NAME}"
+#     # Build the full command to re-run inside tmux
+#     ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL"
+#     if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
+#     for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
 
-    tmux new-session -d -s "$TMUX_SESSION" \
-        "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
-         conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
-         cd $PROJ_DIR && \
-         bash $SCRIPT_DIR/run_qwen3-8b.sh $ARGS; \
-         exec bash"
-    echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
-    exit 0
-fi
+#     tmux new-session -d -s "$TMUX_SESSION" \
+#         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
+#          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
+#          cd $PROJ_DIR && \
+#          bash $SCRIPT_DIR/run_qwen3-8b.sh $ARGS; \
+#          exec bash"
+#     echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
+#     exit 0
+# fi
 
 export CUDA_VISIBLE_DEVICES=$GPUS
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
 export WANDB_ENTITY="mhong-university-of-minnesota"
-export VERL_DEFAULT_LOCAL_DIR="checkpoints/$EXP_NAME"
+export VERL_DEFAULT_LOCAL_DIR="$CKPT_ROOT/$EXP_NAME"
 
 # Save terminal output to log file
-LOG_FILE="checkpoints/$EXP_NAME/train.log"
+LOG_FILE="$CKPT_ROOT/$EXP_NAME/train.log"
 echo "Logging to: $LOG_FILE"
+
+# Build optimizer-specific args
+if [[ "$OPTIM" == "sgd" ]]; then
+    OPTIM_ARGS="actor_rollout_ref.actor.optim.optimizer=SGD actor_rollout_ref.actor.optim.optimizer_impl=torch.optim actor_rollout_ref.actor.optim.override_optimizer_config={momentum:$MOMENTUM}"
+else
+    OPTIM_ARGS="actor_rollout_ref.actor.optim.betas=[$BETA1,$BETA2]"
+fi
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=data/gsm8k/train.parquet \
     data.val_files=data/gsm8k/test.parquet \
-    data.train_batch_size=1024 \
+    data.train_batch_size=128 \
     data.max_prompt_length=512 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=$LR \
-    actor_rollout_ref.actor.optim.betas="[$BETA1,$BETA2]" \
+    ${OPTIM_ARGS} \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -122,7 +142,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_grpo_example_gsm8k' \
     trainer.experiment_name="$EXP_NAME" \
-    trainer.default_local_dir="checkpoints/$EXP_NAME" \
+    trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
     trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
