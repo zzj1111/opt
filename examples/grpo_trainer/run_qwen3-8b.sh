@@ -98,7 +98,7 @@ echo "Logging to: $LOG_FILE"
 
 # Build optimizer-specific args
 if [[ "$OPTIM" == "sgd" ]]; then
-    OPTIM_ARGS="actor_rollout_ref.actor.optim.optimizer=SGD actor_rollout_ref.actor.optim.optimizer_impl=torch.optim actor_rollout_ref.actor.optim.override_optimizer_config={momentum:$MOMENTUM}"
+    OPTIM_ARGS="actor_rollout_ref.actor.optim.optimizer=SGD actor_rollout_ref.actor.optim.optimizer_impl=torch.optim actor_rollout_ref.actor.optim.weight_decay=0.0 actor_rollout_ref.actor.optim.override_optimizer_config={momentum:$MOMENTUM}"
 else
     OPTIM_ARGS="actor_rollout_ref.actor.optim.betas=[$BETA1,$BETA2]"
 fi

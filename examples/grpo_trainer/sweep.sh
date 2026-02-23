@@ -48,21 +48,21 @@ echo "Sweep directory: $SWEEP_DIR"
 # Build the list of all experiments: "OPTIM LR PARAM1 PARAM2"
 EXPERIMENTS=()
 
-# SGD experiments (run first)
+# SGD experiments
 for LR in $SGD_LR_LIST; do
     for MU in $SGD_MOMENTUM_LIST; do
         EXPERIMENTS+=("sgd $LR $MU 0")
     done
 done
 
-# AdamW experiments
-for LR in $ADAMW_LR_LIST; do
-    for BETA1 in $ADAMW_BETA1_LIST; do
-        for BETA2 in $ADAMW_BETA2_LIST; do
-            EXPERIMENTS+=("adamw $LR $BETA1 $BETA2")
-        done
-    done
-done
+# # AdamW experiments (disabled for this run)
+# for LR in $ADAMW_LR_LIST; do
+#     for BETA1 in $ADAMW_BETA1_LIST; do
+#         for BETA2 in $ADAMW_BETA2_LIST; do
+#             EXPERIMENTS+=("adamw $LR $BETA1 $BETA2")
+#         done
+#     done
+# done
 
 TOTAL=${#EXPERIMENTS[@]}
 echo "Total experiments: $TOTAL"
