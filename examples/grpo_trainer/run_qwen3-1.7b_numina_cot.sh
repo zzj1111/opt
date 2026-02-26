@@ -152,4 +152,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=200 \
     trainer.test_freq=10 \
-    trainer.total_epochs=3 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+    trainer.total_epochs=2 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
