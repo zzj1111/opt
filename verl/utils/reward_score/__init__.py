@@ -60,14 +60,7 @@ def default_compute_score(
         from . import math_dapo
 
         res = math_dapo.compute_score(solution_str, ground_truth)
-    elif data_source in [
-        "numina_aops_forum",
-        "numina_synthetic_math",
-        "numina_amc_aime",
-        "numina_synthetic_amc",
-        "numina_cn_k12",
-        "numina_olympiads",
-    ]:
+    elif data_source.startswith("numina_"):
         from . import prime_math
 
         res = prime_math.compute_score(solution_str, ground_truth)

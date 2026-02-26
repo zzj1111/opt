@@ -1,0 +1,19 @@
+{
+  "data_source": "numina_orca_math",
+  "prompt": [
+    {
+      "role": "user",
+      "content": "For the family reunion, Peter is buying 16 pounds of bone-in chicken and half that amount in hamburgers. He's going to buy 2 more pounds of hot dogs than hamburgers. He's also going to buy several sides that will weigh some amount of hot dogs. Peter will buy 39 pounds of food. What is the ratio of the weight of the sides to the weight of the hot dogs? Let's think step by step and output the final answer within \\boxed{}."
+    }
+  ],
+  "ability": "math",
+  "reward_model": {
+    "style": "rule",
+    "ground_truth": "1:2"
+  },
+  "extra_info": {
+    "split": "train",
+    "index": 0,
+    "source": "orca_math"
+  }
+}

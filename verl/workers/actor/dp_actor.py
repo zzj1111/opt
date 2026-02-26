@@ -17,6 +17,7 @@
 Single Process Actor
 """
 
+import contextlib
 import logging
 import os
 import re
@@ -132,6 +133,17 @@ def _get_layer_group(name):
     if m:
         return m.group(1)
     return "other"
+
+
+def _layer_sort_key(name):
+    """Sort key for layer group names: embed_tokens < layers.N < model.norm < lm_head."""
+    return (
+        0 if name == "embed_tokens" else
+        1 if name.startswith("layers.") else
+        2 if name == "model.norm" else
+        3 if name == "lm_head" else 4,
+        int(re.search(r'\d+', name).group()) if re.search(r'\d+', name) and name.startswith("layers.") else 0
+    )
 
 
 class LMHeadGradTracker:
@@ -917,7 +929,324 @@ def _plot_token_class_sg_norm(step, save_dir):
     plt.close(fig)
 
 
+def log_update_analysis(sparsity_result, rank_result, step, save_dir, plot_every=10):
+    """Log update sparsity and effective rank to JSONL, generate plots periodically."""
+    if dist.is_initialized() and dist.get_rank() != 0:
+        return
+
+    import json
+    os.makedirs(save_dir, exist_ok=True)
+
+    record = {"grad_step": step}
+    if sparsity_result:
+        record["sparsity_layer_names"] = sparsity_result["layer_names"]
+        record["sparsity"] = sparsity_result["sparsity"]
+        record["global_sparsity"] = sparsity_result["global_sparsity"]
+    if rank_result and rank_result.get("effective_rank"):
+        record["rank_layer_names"] = rank_result["layer_names"]
+        record["effective_rank"] = rank_result["effective_rank"]
+        record["global_effective_rank"] = rank_result["global_effective_rank"]
+
+    jsonl_path = os.path.join(save_dir, "update_analysis.jsonl")
+    with open(jsonl_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+    if step % plot_every == 0:
+        _plot_update_sparsity(jsonl_path, save_dir)
+        _plot_effective_rank(jsonl_path, save_dir)
+
+
+def _plot_update_sparsity(jsonl_path, save_dir):
+    """Plot update sparsity: line plot over steps + per-layer bar chart at latest step."""
+    import json
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    records = []
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    records = [r for r in records if "sparsity" in r]
+    if not records:
+        return
+
+    plot_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    steps = [r["grad_step"] for r in records]
+    layer_names = records[0]["sparsity_layer_names"]
+    num_layers = len(layer_names)
+
+    # --- Line plot: sparsity over training steps (Figure 4 style) ---
+    if len(records) >= 2:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        global_sp = [r["global_sparsity"] for r in records]
+        ax.plot(steps, global_sp, linewidth=2.5, color="black", label="Global", zorder=10)
+        cmap = plt.cm.get_cmap("tab20", num_layers)
+        for i, name in enumerate(layer_names):
+            vals = [r["sparsity"][i] for r in records]
+            ax.plot(steps, vals, linewidth=0.8, color=cmap(i), alpha=0.6, label=name)
+        ax.set_xlabel("Training Step")
+        ax.set_ylabel("Update Sparsity")
+        ax.set_title("Parameter Update Sparsity Over Training (threshold=1e-5)")
+        ax.set_ylim(bottom=max(0, min(global_sp) - 0.05), top=1.001)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=5, ncol=3, loc="lower left")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "update_sparsity_over_steps.png"), dpi=150)
+        plt.close(fig)
+
+    # --- Bar chart: per-layer sparsity at latest step (Figure 3 style) ---
+    latest = records[-1]
+    fig, ax = plt.subplots(figsize=(max(12, num_layers * 0.4), 6))
+    x = np.arange(num_layers)
+    ax.bar(x, latest["sparsity"], color="steelblue", edgecolor="white", linewidth=0.5)
+    ax.axhline(y=latest["global_sparsity"], color="red", linestyle="--", linewidth=1.5,
+               label=f"Global: {latest['global_sparsity']:.6f}")
+    ax.set_xticks(x)
+    ax.set_xticklabels(layer_names, rotation=90, fontsize=6)
+    ax.set_ylabel("Update Sparsity")
+    ax.set_title(f"Per-Layer Update Sparsity (Step {latest['grad_step']})")
+    ax.set_ylim(bottom=max(0, min(latest["sparsity"]) - 0.05), top=1.001)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "update_sparsity_by_layer.png"), dpi=150)
+    plt.close(fig)
+
+
+def _plot_effective_rank(jsonl_path, save_dir):
+    """Plot effective rank: line plot over steps + per-layer bar chart at latest step."""
+    import json
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    records = []
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    records = [r for r in records if "effective_rank" in r and r["effective_rank"]]
+    if not records:
+        return
+
+    plot_dir = os.path.join(save_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    steps = [r["grad_step"] for r in records]
+    layer_names = records[0]["rank_layer_names"]
+    num_layers = len(layer_names)
+
+    # --- Line plot: effective rank over training steps ---
+    if len(records) >= 2:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        global_er = [r["global_effective_rank"] for r in records]
+        ax.plot(steps, global_er, linewidth=2.5, color="black", label="Global Mean", zorder=10)
+        cmap = plt.cm.get_cmap("tab20", num_layers)
+        for i, name in enumerate(layer_names):
+            vals = [r["effective_rank"][i] for r in records]
+            ax.plot(steps, vals, linewidth=0.8, color=cmap(i), alpha=0.6, label=name)
+        ax.set_xlabel("Training Step")
+        ax.set_ylabel("Effective Rank (99% spectral energy)")
+        ax.set_title("Effective Rank of Parameter Updates Over Training")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=5, ncol=3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "effective_rank_over_steps.png"), dpi=150)
+        plt.close(fig)
+
+    # --- Bar chart: per-layer effective rank at latest step ---
+    latest = records[-1]
+    fig, ax = plt.subplots(figsize=(max(12, num_layers * 0.4), 6))
+    x = np.arange(num_layers)
+    ax.bar(x, latest["effective_rank"], color="coral", edgecolor="white", linewidth=0.5)
+    ax.axhline(y=latest["global_effective_rank"], color="red", linestyle="--", linewidth=1.5,
+               label=f"Global Mean: {latest['global_effective_rank']:.1f}")
+    ax.set_xticks(x)
+    ax.set_xticklabels(layer_names, rotation=90, fontsize=6)
+    ax.set_ylabel("Effective Rank")
+    ax.set_title(f"Per-Layer Effective Rank of Updates (Step {latest['grad_step']})")
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "effective_rank_by_layer.png"), dpi=150)
+    plt.close(fig)
+
+
 import math
+
+
+class UpdateAnalysisTracker:
+    """Track parameter update sparsity and effective rank relative to initial parameters.
+
+    Based on: "Do We Need Adam? Surprisingly Strong and Sparse Reinforcement
+    Learning with SGD in LLMs" (Mukherjee et al., 2025)
+
+    Sparsity: 1 - ||theta_t - theta_0||_0 / n, with threshold 1e-5
+    Effective rank: min k s.t. top-k singular values capture >= 99% spectral energy
+    """
+
+    SPARSITY_THRESHOLD = 1e-5
+    ENERGY_THRESHOLD = 0.99
+
+    def __init__(self, model):
+        """Save initial parameter snapshots for later comparison.
+
+        Args:
+            model: FSDP-wrapped model. All ranks must call this together.
+        """
+        base = getattr(model, "module", model)
+        rank = dist.get_rank()
+
+        # Sharded init params on CPU (all ranks, for sparsity)
+        self._init_sharded = {}
+        for name, param in base.named_parameters():
+            self._init_sharded[name] = param.detach().cpu().clone()
+
+        # Full 2D init params on CPU, rank 0 only (for effective rank SVD)
+        self._init_full_2d = {}
+        with FSDP.summon_full_params(model, rank0_only=True, writeback=False):
+            if rank == 0:
+                for name, param in base.named_parameters():
+                    if param.dim() >= 2:
+                        self._init_full_2d[name] = param.detach().float().cpu().clone()
+
+        if rank == 0:
+            n_2d = len(self._init_full_2d)
+            mem_mb = sum(p.numel() * 4 for p in self._init_full_2d.values()) / 1e6
+            print(f"[UpdateAnalysisTracker] Saved {n_2d} 2D param snapshots ({mem_mb:.0f} MB CPU RAM)")
+
+    @torch.no_grad()
+    def compute_update_sparsity(self, model):
+        """Per-layer update sparsity using sharded params (FSDP-safe).
+
+        All ranks must call this (uses all_reduce).
+        Returns dict with layer_names, sparsity (per-layer list), global_sparsity.
+        """
+        base = getattr(model, "module", model)
+
+        groups = {}
+        for name, _ in base.named_parameters():
+            g = _get_layer_group(name)
+            if g not in groups:
+                groups[g] = True
+        sorted_names = sorted(groups.keys(), key=_layer_sort_key)
+        layer_idx = {n: i for i, n in enumerate(sorted_names)}
+        num_layers = len(sorted_names)
+
+        dev = torch.cuda.current_device()
+        # col 0 = nonzero count, col 1 = total count
+        accum = torch.zeros(num_layers, 2, device=dev, dtype=torch.float64)
+
+        for name, param in base.named_parameters():
+            init_val = self._init_sharded.get(name)
+            if init_val is None:
+                continue
+            init_gpu = init_val.to(device=param.device, dtype=torch.float32)
+            diff = param.detach().float() - init_gpu
+            nz = (diff.abs() > self.SPARSITY_THRESHOLD).sum()
+            total = diff.numel()
+            del diff, init_gpu
+
+            idx = layer_idx.get(_get_layer_group(name))
+            if idx is not None:
+                accum[idx, 0] += nz
+                accum[idx, 1] += total
+
+        dist.all_reduce(accum, op=dist.ReduceOp.SUM)
+
+        result = {"layer_names": sorted_names, "sparsity": []}
+        total_nz, total_n = 0.0, 0.0
+        for i in range(num_layers):
+            nz, tot = accum[i, 0].item(), accum[i, 1].item()
+            result["sparsity"].append(1.0 - nz / tot if tot > 0 else 0.0)
+            total_nz += nz
+            total_n += tot
+        result["global_sparsity"] = 1.0 - total_nz / total_n if total_n > 0 else 0.0
+
+        # Handle tied weights: lm_head shares weight with embed_tokens
+        if "lm_head" not in result["layer_names"] and "embed_tokens" in result["layer_names"]:
+            embed_idx = result["layer_names"].index("embed_tokens")
+            result["layer_names"].append("lm_head")
+            result["sparsity"].append(result["sparsity"][embed_idx])
+
+        return result
+
+    @torch.no_grad()
+    def compute_effective_rank(self, model):
+        """Per-layer effective rank of parameter updates via SVD.
+
+        All ranks must call this (uses summon_full_params collective).
+        Returns dict with layer_names, effective_rank (per-layer), global_effective_rank.
+        Only rank 0 gets meaningful values; other ranks get empty lists.
+        """
+        rank = dist.get_rank()
+        base = getattr(model, "module", model)
+
+        layer_2d = {}
+        for name, param in base.named_parameters():
+            if param.dim() >= 2:
+                g = _get_layer_group(name)
+                if g not in layer_2d:
+                    layer_2d[g] = []
+                layer_2d[g].append(name)
+
+        sorted_names = sorted(layer_2d.keys(), key=_layer_sort_key)
+        result = {"layer_names": sorted_names, "effective_rank": [], "global_effective_rank": 0.0}
+
+        with FSDP.summon_full_params(model, rank0_only=True, writeback=False):
+            if rank == 0:
+                param_dict = dict(base.named_parameters())
+                all_ranks_list = []
+                for group_name in sorted_names:
+                    group_ranks = []
+                    for pname in layer_2d[group_name]:
+                        init_val = self._init_full_2d.get(pname)
+                        if init_val is None:
+                            continue
+                        param = param_dict[pname]
+                        delta = param.detach().float() - init_val.to(param.device)
+                        if delta.dim() > 2:
+                            delta = delta.reshape(delta.shape[0], -1)
+
+                        S = torch.linalg.svdvals(delta)
+                        S_sq = S.pow(2)
+                        total_energy = S_sq.sum().item()
+                        if total_energy < 1e-30:
+                            group_ranks.append(0)
+                        else:
+                            cumsum = torch.cumsum(S_sq, dim=0)
+                            k = (cumsum >= self.ENERGY_THRESHOLD * total_energy).nonzero(as_tuple=True)[0]
+                            group_ranks.append(k[0].item() + 1 if k.numel() > 0 else len(S))
+                        del delta, S, S_sq
+
+                    avg = sum(group_ranks) / len(group_ranks) if group_ranks else 0.0
+                    result["effective_rank"].append(avg)
+                    all_ranks_list.extend(group_ranks)
+
+                result["global_effective_rank"] = (
+                    sum(all_ranks_list) / len(all_ranks_list) if all_ranks_list else 0.0
+                )
+
+        if rank != 0:
+            result["effective_rank"] = []
+            result["global_effective_rank"] = 0.0
+
+        # Handle tied weights: lm_head shares weight with embed_tokens
+        if "lm_head" not in result["layer_names"] and "embed_tokens" in result["layer_names"]:
+            embed_idx = result["layer_names"].index("embed_tokens")
+            result["layer_names"].append("lm_head")
+            if rank == 0 and result["effective_rank"]:
+                result["effective_rank"].append(result["effective_rank"][embed_idx])
+
+        return result
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -977,6 +1306,11 @@ class DataParallelPPOActor(BasePPOActor):
                 if torch.distributed.get_rank() == 0:
                     print(f"[Actor] LMHeadGradTracker registered on {lm_head_mod.__class__.__name__}")
 
+        # --- Update analysis tracker (sparsity & effective rank, actor only) ---
+        self._update_tracker = None
+        if actor_optimizer is not None:
+            self._update_tracker = UpdateAnalysisTracker(actor_module)
+
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -992,7 +1326,12 @@ class DataParallelPPOActor(BasePPOActor):
 
             multi_modal_inputs = extract_multi_modal_inputs(micro_batch["multi_modal_inputs"])
 
-        with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
+        autocast_ctx = (
+            torch.autocast(device_type=self.device_name, dtype=self.param_dtype)
+            if not self.config.get("disable_autocast", False)
+            else contextlib.nullcontext()
+        )
+        with autocast_ctx:
             input_ids = micro_batch["input_ids"]
             batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
@@ -1363,6 +1702,22 @@ class DataParallelPPOActor(BasePPOActor):
         # pre-clip 的原始梯度范数也一并记录
         for k, v in stats_pre["global"].items():
             analysis_metrics[f"analysis/pre_clip_{k}"] = v
+
+        # --- Update Analysis: Sparsity & Effective Rank ---
+        if self._update_tracker is not None:
+            sparsity_result = None
+            rank_result = None
+            if current_step % 10 == 0:
+                sparsity_result = self._update_tracker.compute_update_sparsity(self.actor_module)
+            if current_step % 50 == 0:
+                rank_result = self._update_tracker.compute_effective_rank(self.actor_module)
+            if sparsity_result or rank_result:
+                log_update_analysis(sparsity_result, rank_result, current_step, analysis_save_dir)
+                if dist.get_rank() == 0:
+                    if sparsity_result:
+                        analysis_metrics["analysis/update_sparsity"] = sparsity_result["global_sparsity"]
+                    if rank_result:
+                        analysis_metrics["analysis/effective_rank"] = rank_result["global_effective_rank"]
 
         return grad_norm, analysis_metrics
 
