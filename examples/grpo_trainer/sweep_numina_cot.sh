@@ -30,7 +30,7 @@ ADAMW_BETA1_LIST="0.9"
 ADAMW_BETA2_LIST="0.999"
 
 # --- SGD grid ---
-SGD_LR_LIST="0.1"
+SGD_LR_LIST="0.1 0.01"
 SGD_MOMENTUM_LIST="0"
 
 # --- Rollout grid (applied to all optimizers) ---
