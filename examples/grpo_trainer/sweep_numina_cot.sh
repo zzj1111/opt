@@ -34,7 +34,7 @@ SGD_LR_LIST="0.1"
 SGD_MOMENTUM_LIST="0"
 
 # --- Rollout grid (applied to all optimizers) ---
-ROLLOUT_N_LIST="4 5 8"
+ROLLOUT_N_LIST="5"
 # =====================================================================
 
 # Create sweep root directory
