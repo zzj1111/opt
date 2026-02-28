@@ -1121,6 +1121,9 @@ class UpdateAnalysisTracker:
         if rank == 0:
             n_2d = len(self._init_full_2d)
             mem_mb = sum(p.numel() * 4 for p in self._init_full_2d.values()) / 1e6
+            # Print param dtype to verify BF16 vs FP32 storage
+            sample_dtype = next(iter(self._init_sharded.values())).dtype
+            print(f"[UpdateAnalysisTracker] param storage dtype: {sample_dtype}")
             print(f"[UpdateAnalysisTracker] Saved {n_2d} 2D param snapshots ({mem_mb:.0f} MB CPU RAM)")
 
     @torch.no_grad()
@@ -1190,13 +1193,16 @@ class UpdateAnalysisTracker:
         rank = dist.get_rank()
         base = getattr(model, "module", model)
 
+        # Build layer_2d from _init_full_2d keys (which were captured inside
+        # summon_full_params during __init__).  Outside the context manager,
+        # FSDP use_orig_params=False stores everything as 1-D FlatParameter,
+        # so checking param.dim() >= 2 here would always be False.
         layer_2d = {}
-        for name, param in base.named_parameters():
-            if param.dim() >= 2:
-                g = _get_layer_group(name)
-                if g not in layer_2d:
-                    layer_2d[g] = []
-                layer_2d[g].append(name)
+        for name in self._init_full_2d:
+            g = _get_layer_group(name)
+            if g not in layer_2d:
+                layer_2d[g] = []
+            layer_2d[g].append(name)
 
         sorted_names = sorted(layer_2d.keys(), key=_layer_sort_key)
         result = {"layer_names": sorted_names, "effective_rank": [], "global_effective_rank": 0.0}
@@ -1677,6 +1683,15 @@ class DataParallelPPOActor(BasePPOActor):
                 pl["g_norm"].append(lm_head_stats.get("agg_g_norm", 0.0))
                 pl["m_norm"].append(lm_head_stats.get("agg_m_norm", 0.0))
                 pl["eff_lr_mean"].append(lm_head_stats.get("agg_eff_lr_mean", 0.0))
+
+            # Fix embed_tokens g_norm: FSDP corrupts tied-weight gradients,
+            # so embed_tokens' p.grad misses the dense lm_head gradient.
+            # Replace with the tracker's correct value (same shared weight).
+            if "embed_tokens" in pl.get("layer_names", []):
+                embed_idx = pl["layer_names"].index("embed_tokens")
+                pl["g_norm"][embed_idx] = lm_head_stats.get("agg_g_norm", pl["g_norm"][embed_idx])
+                pl["m_norm"][embed_idx] = lm_head_stats.get("agg_m_norm", pl["m_norm"][embed_idx])
+                pl["eff_lr_mean"][embed_idx] = lm_head_stats.get("agg_eff_lr_mean", pl["eff_lr_mean"][embed_idx])
 
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")

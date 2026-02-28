@@ -21,7 +21,7 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 # ===================== EDIT YOUR SWEEP GRID HERE =====================
 GPUS="0,1,2,3,4,5,6,7"
 MODEL="Qwen/Qwen3-1.7B"
-DATA_DIR="$PROJ_DIR/data/numina_math_cot"
+DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 NOTE="sweep"
 
 # --- AdamW grid ---

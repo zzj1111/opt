@@ -18,8 +18,9 @@ MODEL="Qwen/Qwen3-1.7B"
 OPTIM="adamw"
 MOMENTUM=0.9
 ROLLOUT_N=5
+MODEL_DTYPE="fp32"
 CKPT_ROOT="checkpoints"
-DATA_DIR="$PROJ_DIR/data/numina_math_cot"
+DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
         --optim) OPTIM="$2"; shift 2 ;;
         --momentum) MOMENTUM="$2"; shift 2 ;;
         --rollout-n) ROLLOUT_N="$2"; shift 2 ;;
+        --model-dtype) MODEL_DTYPE="$2"; shift 2 ;;
         --ckpt-root) CKPT_ROOT="$2"; shift 2 ;;
         --data-dir) DATA_DIR="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
@@ -78,7 +80,7 @@ fi
 if [[ -z "$TMUX" ]]; then
     TMUX_SESSION="train_${EXP_NAME}"
     # Build the full command to re-run inside tmux
-    ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --rollout-n $ROLLOUT_N --ckpt-root $CKPT_ROOT --data-dir $DATA_DIR"
+    ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --rollout-n $ROLLOUT_N --model-dtype $MODEL_DTYPE --ckpt-root $CKPT_ROOT --data-dir $DATA_DIR"
     if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
     for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
 
@@ -128,6 +130,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
