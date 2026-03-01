@@ -496,6 +496,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if fsdp_strategy == "fsdp":
             tied_w = actor_module.get_output_embeddings().weight  
 
+            if self.rank == 0:
+                print(f"[FSDP] use_orig_params={self.use_orig_params}")
+
             actor_module_fsdp = FSDP(
                 actor_module,
                 cpu_offload=cpu_offload,
