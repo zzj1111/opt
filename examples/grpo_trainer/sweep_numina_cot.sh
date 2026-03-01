@@ -5,7 +5,7 @@
 # All experiments are placed under a single sweep directory for easy download.
 #
 # Usage:
-#   bash examples/grpo_trainer/sweep_numina_cot.sh [--tmux SESSION_NAME] [--note NOTE]
+#   bash examples/grpo_trainer/sweep_numina_cot.sh [--tmux SESSION_NAME] [--note NOTE] [--model-dtype fp32|bf16]
 #
 # The script will:
 #   1. Create a sweep directory: checkpoints/sweep_numina_MMDD/
@@ -21,10 +21,12 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 # Parse CLI args
 TMUX_NAME="sweep_numina"
 NOTE="sweep"
+MODEL_DTYPE="fp32"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --tmux) TMUX_NAME="$2"; shift 2 ;;
         --note) NOTE="$2"; shift 2 ;;
+        --model-dtype) MODEL_DTYPE="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -99,7 +101,7 @@ if [[ -z "$TMUX" ]]; then
         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
          cd $PROJ_DIR && \
-         bash $SCRIPT_DIR/sweep_numina_cot.sh --tmux $TMUX_NAME --note $NOTE; \
+         bash $SCRIPT_DIR/sweep_numina_cot.sh --tmux $TMUX_NAME --note $NOTE --model-dtype $MODEL_DTYPE; \
          exec bash"
     echo "Sweep started in tmux session '$TMUX_NAME'. Attach with: tmux attach -t $TMUX_NAME"
     exit 0
@@ -125,6 +127,7 @@ for i in "${!EXPERIMENTS[@]}"; do
             --rollout-n "$RN" \
             --ckpt-root "$SWEEP_DIR" \
             --data-dir "$DATA_DIR" \
+            --model-dtype "$MODEL_DTYPE" \
             --note "$NOTE"
     else
         echo " sgd    lr=$LR  momentum=$P1  rollout.n=$RN"
@@ -138,6 +141,7 @@ for i in "${!EXPERIMENTS[@]}"; do
             --rollout-n "$RN" \
             --ckpt-root "$SWEEP_DIR" \
             --data-dir "$DATA_DIR" \
+            --model-dtype "$MODEL_DTYPE" \
             --note "$NOTE"
     fi
 
