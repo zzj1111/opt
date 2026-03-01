@@ -1766,14 +1766,11 @@ class DataParallelPPOActor(BasePPOActor):
                 pl["m_norm"].append(lm_head_stats.get("agg_m_norm", 0.0))
                 pl["eff_lr_mean"].append(lm_head_stats.get("agg_eff_lr_mean", 0.0))
 
-            # Fix embed_tokens g_norm: FSDP corrupts tied-weight gradients,
-            # so embed_tokens' p.grad misses the dense lm_head gradient.
-            # Replace with the tracker's correct value (same shared weight).
-            if "embed_tokens" in pl.get("layer_names", []):
-                embed_idx = pl["layer_names"].index("embed_tokens")
-                pl["g_norm"][embed_idx] = lm_head_stats.get("agg_g_norm", pl["g_norm"][embed_idx])
-                pl["m_norm"][embed_idx] = lm_head_stats.get("agg_m_norm", pl["m_norm"][embed_idx])
-                pl["eff_lr_mean"][embed_idx] = lm_head_stats.get("agg_eff_lr_mean", pl["eff_lr_mean"][embed_idx])
+            # NOTE: With use_orig_params=True, FSDP correctly handles tied-weight
+            # gradients, so embed_tokens' g_norm/m_norm/eff_lr_mean from
+            # get_fsdp_comprehensive_analysis are already correct (combined
+            # embedding + lm_head). Do NOT overwrite them with tracker values
+            # (which only capture the lm_head portion).
 
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
