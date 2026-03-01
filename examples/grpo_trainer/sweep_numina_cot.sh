@@ -5,7 +5,7 @@
 # All experiments are placed under a single sweep directory for easy download.
 #
 # Usage:
-#   bash examples/grpo_trainer/sweep_numina_cot.sh
+#   bash examples/grpo_trainer/sweep_numina_cot.sh [--tmux SESSION_NAME]
 #
 # The script will:
 #   1. Create a sweep directory: checkpoints/sweep_numina_MMDD/
@@ -17,6 +17,15 @@ set -x
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
+
+# Parse CLI args
+TMUX_NAME="sweep_numina"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --tmux) TMUX_NAME="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
+    esac
+done
 
 # ===================== EDIT YOUR SWEEP GRID HERE =====================
 GPUS="0,1,2,3,4,5,6,7"
@@ -85,13 +94,13 @@ done
 
 # If not inside tmux, launch a tmux session and re-run inside it
 if [[ -z "$TMUX" ]]; then
-    tmux new-session -d -s "sweep_numina" \
+    tmux new-session -d -s "$TMUX_NAME" \
         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
          cd $PROJ_DIR && \
-         bash $SCRIPT_DIR/sweep_numina_cot.sh; \
+         bash $SCRIPT_DIR/sweep_numina_cot.sh --tmux $TMUX_NAME; \
          exec bash"
-    echo "Sweep started in tmux session 'sweep_numina'. Attach with: tmux attach -t sweep_numina"
+    echo "Sweep started in tmux session '$TMUX_NAME'. Attach with: tmux attach -t $TMUX_NAME"
     exit 0
 fi
 

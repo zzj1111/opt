@@ -1118,6 +1118,19 @@ class UpdateAnalysisTracker:
                     if param.dim() >= 2:
                         self._init_full_2d[name] = param.detach().float().cpu().clone()
 
+        # Sanity check: verify snapshot matches live param (should be zero diff)
+        for name, param in base.named_parameters():
+            if "embed_tokens" in name:
+                snap = self._init_sharded[name]
+                live = param.detach().cpu().float()
+                snap_f = snap.float()
+                max_diff = (live - snap_f).abs().max().item()
+                print(f"[UpdateAnalysisTracker] INIT CHECK embed_tokens shard: "
+                      f"max|live-snap|={max_diff:.2e}, "
+                      f"live_dtype={param.dtype}, snap_dtype={snap.dtype}, "
+                      f"shard_numel={param.numel()}")
+                break
+
         if rank == 0:
             n_2d = len(self._init_full_2d)
             mem_mb = sum(p.numel() * 4 for p in self._init_full_2d.values()) / 1e6
@@ -1148,22 +1161,41 @@ class UpdateAnalysisTracker:
         # col 0 = nonzero count, col 1 = total count
         accum = torch.zeros(num_layers, 2, device=dev, dtype=torch.float64)
 
+        # Diagnostic stats for embed_tokens: [max_abs_diff, sum_abs_diff,
+        # count>1e-6, count>1e-7, param_norm, init_norm, total_elements]
+        embed_diag = torch.zeros(7, device=dev, dtype=torch.float64)
+
         for name, param in base.named_parameters():
             init_val = self._init_sharded.get(name)
             if init_val is None:
                 continue
             init_gpu = init_val.to(device=param.device, dtype=torch.float32)
             diff = param.detach().float() - init_gpu
-            nz = (diff.abs() > self.SPARSITY_THRESHOLD).sum()
+            abs_diff = diff.abs()
+            nz = (abs_diff > self.SPARSITY_THRESHOLD).sum()
             total = diff.numel()
-            del diff, init_gpu
 
             idx = layer_idx.get(_get_layer_group(name))
             if idx is not None:
                 accum[idx, 0] += nz
                 accum[idx, 1] += total
 
+            # Collect embed_tokens diagnostics
+            if "embed_tokens" in name:
+                embed_diag[0] = max(embed_diag[0].item(), abs_diff.max().item())
+                embed_diag[1] += abs_diff.sum()
+                embed_diag[2] += (abs_diff > 1e-6).sum()
+                embed_diag[3] += (abs_diff > 1e-7).sum()
+                embed_diag[4] += param.detach().float().norm() ** 2
+                embed_diag[5] += init_gpu.norm() ** 2
+                embed_diag[6] += total
+
+            del diff, abs_diff, init_gpu
+
         dist.all_reduce(accum, op=dist.ReduceOp.SUM)
+        # For embed_diag: max needs MAX reduce, rest needs SUM
+        dist.all_reduce(embed_diag[1:], op=dist.ReduceOp.SUM)
+        dist.all_reduce(embed_diag[0:1], op=dist.ReduceOp.MAX)
 
         result = {"layer_names": sorted_names, "sparsity": []}
         total_nz, total_n = 0.0, 0.0
@@ -1173,6 +1205,30 @@ class UpdateAnalysisTracker:
             total_nz += nz
             total_n += tot
         result["global_sparsity"] = 1.0 - total_nz / total_n if total_n > 0 else 0.0
+
+        # Store embed_tokens diagnostic in result for wandb logging
+        if embed_diag[6].item() > 0:
+            n_elem = int(embed_diag[6].item())
+            embed_idx_val = layer_idx.get("embed_tokens", 0)
+            result["embed_diag"] = {
+                "max_abs_diff": embed_diag[0].item(),
+                "mean_abs_diff": embed_diag[1].item() / n_elem,
+                "count_gt_1e5": int(accum[embed_idx_val, 0].item()),
+                "count_gt_1e6": int(embed_diag[2].item()),
+                "count_gt_1e7": int(embed_diag[3].item()),
+                "total_elements": n_elem,
+                "param_norm": embed_diag[4].item() ** 0.5,
+                "init_norm": embed_diag[5].item() ** 0.5,
+            }
+            if dist.get_rank() == 0:
+                ed = result["embed_diag"]
+                print(f"[EMBED DIAG] max|θ-θ₀|={ed['max_abs_diff']:.6e}, "
+                      f"mean|θ-θ₀|={ed['mean_abs_diff']:.6e}, "
+                      f"#>1e-5={ed['count_gt_1e5']}/{n_elem}, "
+                      f"#>1e-6={ed['count_gt_1e6']}/{n_elem}, "
+                      f"#>1e-7={ed['count_gt_1e7']}/{n_elem}, "
+                      f"param_norm={ed['param_norm']:.4f}, "
+                      f"init_norm={ed['init_norm']:.4f}")
 
         # Handle tied weights: lm_head shares weight with embed_tokens
         if "lm_head" not in result["layer_names"] and "embed_tokens" in result["layer_names"]:
@@ -1731,6 +1787,19 @@ class DataParallelPPOActor(BasePPOActor):
                 if dist.get_rank() == 0:
                     if sparsity_result:
                         analysis_metrics["analysis/update_sparsity"] = sparsity_result["global_sparsity"]
+                        # Per-layer sparsity to wandb
+                        for lname, sval in zip(sparsity_result["layer_names"], sparsity_result["sparsity"]):
+                            analysis_metrics[f"analysis/sparsity/{lname}"] = sval
+                        # Embed diagnostic to wandb
+                        if "embed_diag" in sparsity_result:
+                            ed = sparsity_result["embed_diag"]
+                            analysis_metrics["analysis/embed/max_abs_diff"] = ed["max_abs_diff"]
+                            analysis_metrics["analysis/embed/mean_abs_diff"] = ed["mean_abs_diff"]
+                            analysis_metrics["analysis/embed/count_gt_1e5"] = ed["count_gt_1e5"]
+                            analysis_metrics["analysis/embed/count_gt_1e6"] = ed["count_gt_1e6"]
+                            analysis_metrics["analysis/embed/count_gt_1e7"] = ed["count_gt_1e7"]
+                            analysis_metrics["analysis/embed/param_norm"] = ed["param_norm"]
+                            analysis_metrics["analysis/embed/init_norm"] = ed["init_norm"]
                     if rank_result:
                         analysis_metrics["analysis/effective_rank"] = rank_result["global_effective_rank"]
 
