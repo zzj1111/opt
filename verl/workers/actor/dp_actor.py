@@ -1429,9 +1429,14 @@ class DataParallelPPOActor(BasePPOActor):
                 self._lm_head_tracker = LMHeadGradTracker(lm_head_mod, embed_module=embed_mod)
                 if torch.distributed.get_rank() == 0:
                     embed_name = embed_mod.__class__.__name__ if embed_mod is not None else "None"
+                    same_weight = (embed_mod is not None
+                                   and hasattr(embed_mod, "weight")
+                                   and hasattr(lm_head_mod, "weight")
+                                   and embed_mod.weight is lm_head_mod.weight)
                     print(f"[Actor] LMHeadGradTracker registered on "
                           f"lm_head={lm_head_mod.__class__.__name__}, "
-                          f"embed={embed_name}")
+                          f"embed={embed_name}, "
+                          f"tied_weights={same_weight}")
 
         # --- Update analysis tracker (sparsity & effective rank, actor only) ---
         self._update_tracker = None
@@ -1780,52 +1785,41 @@ class DataParallelPPOActor(BasePPOActor):
         if self._lm_head_tracker is not None:
             base = getattr(self.actor_module, "module", self.actor_module)
             dev = torch.cuda.current_device()
-
-            # Directly locate embed_tokens and lm_head modules (no full iteration)
-            inner = getattr(base, "model", base)
-            embed_mod = getattr(inner, "embed_tokens", None)
-            lm_head_mod = getattr(base, "lm_head", None)
-
-            # [embed_sq_norm, lmhead_sq_norm]
-            local_stats = torch.zeros(2, device=dev, dtype=torch.float64)
-            if embed_mod is not None and hasattr(embed_mod, "weight") and embed_mod.weight.grad is not None:
-                g = embed_mod.weight.grad.detach()
-                if isinstance(g, DTensor):
-                    g = g.to_local()
-                local_stats[0] = g.norm().double() ** 2
-                del g
-            if lm_head_mod is not None and hasattr(lm_head_mod, "weight") and lm_head_mod.weight.grad is not None:
-                g = lm_head_mod.weight.grad.detach()
-                if isinstance(g, DTensor):
-                    g = g.to_local()
-                local_stats[1] = g.norm().double() ** 2
-                del g
+            # [squared_norm, nonzero_count, total_count]
+            local_stats = torch.zeros(3, device=dev, dtype=torch.float64)
+            for pname, param in base.named_parameters():
+                if "embed_tokens" in pname and param.grad is not None:
+                    g = param.grad.detach().float()
+                    if isinstance(g, DTensor):
+                        g = g.to_local()
+                    local_stats[0] = g.pow(2).sum().double()
+                    local_stats[1] = (g.abs() > 1e-10).sum().double()
+                    local_stats[2] = float(g.numel())
+                    break
             dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
 
             if dist.get_rank() == 0:
-                fsdp_embed_g_norm = local_stats[0].sqrt().item()
-                fsdp_lmhead_g_norm = local_stats[1].sqrt().item()
-                # Check if they share the same param / grad tensor
-                same_param = (embed_mod is not None and lm_head_mod is not None
-                              and embed_mod.weight is lm_head_mod.weight)
-                same_grad = (same_param
-                             and embed_mod.weight.grad is not None
-                             and embed_mod.weight.grad is lm_head_mod.weight.grad)
+                fsdp_g_norm = local_stats[0].sqrt().item()
+                fsdp_nonzero = int(local_stats[1].item())
+                fsdp_total = int(local_stats[2].item())
                 tracker_g_norm = lm_head_stats.get("agg_g_norm", 0.0)
                 tracker_lm_g = lm_head_stats.get("agg_lm_head_g_norm", tracker_g_norm)
                 tracker_emb_g = lm_head_stats.get("agg_embed_lookup_g_norm", 0.0)
-                print(f"[EMBED GRAD DIAG] "
-                      f"fsdp_embed_g_norm={fsdp_embed_g_norm:.6e}, "
-                      f"fsdp_lmhead_g_norm={fsdp_lmhead_g_norm:.6e}, "
-                      f"same_param={same_param}, same_grad={same_grad}, "
-                      f"tracker_grad_norm={tracker_g_norm:.6e}, "
-                      f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}]")
+                fsdp_nonzero_pct = fsdp_nonzero / max(fsdp_total, 1) * 100
+                grad_ratio = tracker_g_norm / max(fsdp_g_norm, 1e-30)
+                print(f"[EMBED GRAD DIAG] fsdp_grad_norm(global)={fsdp_g_norm:.6e}, "
+                      f"tracker_grad_norm(combined)={tracker_g_norm:.6e}, "
+                      f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}], "
+                      f"fsdp_nonzero={fsdp_nonzero}/{fsdp_total} "
+                      f"({fsdp_nonzero_pct:.1f}%), "
+                      f"ratio(tracker/fsdp)={grad_ratio:.2f}")
                 embed_grad_diag = {
-                    "fsdp_embed_grad_norm": fsdp_embed_g_norm,
-                    "fsdp_lmhead_grad_norm": fsdp_lmhead_g_norm,
+                    "fsdp_grad_norm": fsdp_g_norm,
                     "tracker_grad_norm": tracker_g_norm,
                     "tracker_lm_head_g_norm": tracker_lm_g,
                     "tracker_embed_lookup_g_norm": tracker_emb_g,
+                    "fsdp_grad_nonzero_pct": fsdp_nonzero_pct,
+                    "grad_ratio_tracker_over_fsdp": grad_ratio,
                 }
 
         # --- 执行更新 ---
