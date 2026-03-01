@@ -1780,41 +1780,50 @@ class DataParallelPPOActor(BasePPOActor):
         if self._lm_head_tracker is not None:
             base = getattr(self.actor_module, "module", self.actor_module)
             dev = torch.cuda.current_device()
-            # [squared_norm, nonzero_count, total_count]
-            local_stats = torch.zeros(3, device=dev, dtype=torch.float64)
+            # [embed_sq_norm, embed_nonzero, embed_numel,
+            #  lmhead_sq_norm, lmhead_nonzero, lmhead_numel]
+            local_stats = torch.zeros(6, device=dev, dtype=torch.float64)
             for pname, param in base.named_parameters():
-                if "embed_tokens" in pname and param.grad is not None:
-                    g = param.grad.detach().float()
-                    if isinstance(g, DTensor):
-                        g = g.to_local()
+                if param.grad is None:
+                    continue
+                g = param.grad.detach().float()
+                if isinstance(g, DTensor):
+                    g = g.to_local()
+                if "embed_tokens" in pname:
                     local_stats[0] = g.pow(2).sum().double()
                     local_stats[1] = (g.abs() > 1e-10).sum().double()
                     local_stats[2] = float(g.numel())
-                    break
+                elif "lm_head" in pname:
+                    local_stats[3] = g.pow(2).sum().double()
+                    local_stats[4] = (g.abs() > 1e-10).sum().double()
+                    local_stats[5] = float(g.numel())
             dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
 
             if dist.get_rank() == 0:
-                fsdp_g_norm = local_stats[0].sqrt().item()
-                fsdp_nonzero = int(local_stats[1].item())
-                fsdp_total = int(local_stats[2].item())
+                fsdp_embed_g_norm = local_stats[0].sqrt().item()
+                fsdp_embed_nonzero = int(local_stats[1].item())
+                fsdp_embed_total = int(local_stats[2].item())
+                fsdp_lmhead_g_norm = local_stats[3].sqrt().item()
+                fsdp_lmhead_nonzero = int(local_stats[4].item())
+                fsdp_lmhead_total = int(local_stats[5].item())
                 tracker_g_norm = lm_head_stats.get("agg_g_norm", 0.0)
                 tracker_lm_g = lm_head_stats.get("agg_lm_head_g_norm", tracker_g_norm)
                 tracker_emb_g = lm_head_stats.get("agg_embed_lookup_g_norm", 0.0)
-                fsdp_nonzero_pct = fsdp_nonzero / max(fsdp_total, 1) * 100
-                grad_ratio = tracker_g_norm / max(fsdp_g_norm, 1e-30)
-                print(f"[EMBED GRAD DIAG] fsdp_grad_norm(global)={fsdp_g_norm:.6e}, "
-                      f"tracker_grad_norm(combined)={tracker_g_norm:.6e}, "
+                fsdp_embed_nonzero_pct = fsdp_embed_nonzero / max(fsdp_embed_total, 1) * 100
+                print(f"[EMBED GRAD DIAG] "
+                      f"fsdp_embed_g_norm={fsdp_embed_g_norm:.6e}, "
+                      f"fsdp_lmhead_g_norm={fsdp_lmhead_g_norm:.6e}, "
+                      f"tracker_grad_norm={tracker_g_norm:.6e}, "
                       f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}], "
-                      f"fsdp_nonzero={fsdp_nonzero}/{fsdp_total} "
-                      f"({fsdp_nonzero_pct:.1f}%), "
-                      f"ratio(tracker/fsdp)={grad_ratio:.2f}")
+                      f"fsdp_embed_nonzero={fsdp_embed_nonzero}/{fsdp_embed_total} "
+                      f"({fsdp_embed_nonzero_pct:.1f}%)")
                 embed_grad_diag = {
-                    "fsdp_grad_norm": fsdp_g_norm,
+                    "fsdp_embed_grad_norm": fsdp_embed_g_norm,
+                    "fsdp_lmhead_grad_norm": fsdp_lmhead_g_norm,
                     "tracker_grad_norm": tracker_g_norm,
                     "tracker_lm_head_g_norm": tracker_lm_g,
                     "tracker_embed_lookup_g_norm": tracker_emb_g,
-                    "fsdp_grad_nonzero_pct": fsdp_nonzero_pct,
-                    "grad_ratio_tracker_over_fsdp": grad_ratio,
+                    "fsdp_embed_grad_nonzero_pct": fsdp_embed_nonzero_pct,
                 }
 
         # --- 执行更新 ---
