@@ -1707,6 +1707,23 @@ class DataParallelPPOActor(BasePPOActor):
                 clip_ratio=clip_ratio,
             )
 
+        # --- Diagnose embed_tokens gradient before optimizer step ---
+        if self._lm_head_tracker is not None and dist.get_rank() == 0:
+            base = getattr(self.actor_module, "module", self.actor_module)
+            for pname, param in base.named_parameters():
+                if "embed_tokens" in pname and param.grad is not None:
+                    fsdp_grad = param.grad.detach().float()
+                    fsdp_g_norm = fsdp_grad.norm().item()
+                    fsdp_nonzero = (fsdp_grad.abs() > 1e-10).sum().item()
+                    fsdp_total = fsdp_grad.numel()
+                    tracker_g_norm = lm_head_stats.get("agg_g_norm", 0.0)
+                    print(f"[EMBED GRAD DIAG] fsdp_grad_norm={fsdp_g_norm:.6e}, "
+                          f"tracker_grad_norm={tracker_g_norm:.6e}, "
+                          f"fsdp_nonzero={fsdp_nonzero}/{fsdp_total} "
+                          f"({fsdp_nonzero/fsdp_total*100:.1f}%), "
+                          f"ratio(tracker/fsdp)={tracker_g_norm/max(fsdp_g_norm,1e-30):.2f}")
+                    break
+
         # --- 执行更新 ---
         if self.scaler is not None:
             self.scaler.step(self.actor_optimizer)
