@@ -112,8 +112,8 @@ fi
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files="$DATA_DIR/train.parquet" \
-    data.val_files="$DATA_DIR/test.parquet" \
+    "data.train_files='$DATA_DIR/train.parquet'" \
+    "data.val_files='$DATA_DIR/test.parquet'" \
     data.train_batch_size=256 \
     data.max_prompt_length=1024 \
     data.max_response_length=3072 \
@@ -149,8 +149,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_grpo_numina_cot' \
-    trainer.experiment_name="$EXP_NAME" \
-    trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
+    "trainer.experiment_name='${EXP_NAME}'" \
+    "trainer.default_local_dir='${CKPT_ROOT}/${EXP_NAME}'" \
     trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
     trainer.save_freq=200 \
