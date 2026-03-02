@@ -410,12 +410,32 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
             return full_matrix
 
         # A. 还原参数和梯度
+        # Also find embed_tokens for tied-weight diagnostic
+        inner_model = getattr(getattr(model, "module", model), "model", None)
+        embed_mod = getattr(inner_model, "embed_tokens", None) if inner_model is not None else None
+
         with FSDP.summon_full_params(model, with_grads=True):
             if rank == 0:
                 stats["last_layer"]["shape"] = list(lm_head.weight.shape)
                 stats["last_layer"]["p_norm"] = lm_head.weight.norm(dim=1).cpu().tolist()
                 if lm_head.weight.grad is not None:
                     stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
+
+                # --- Tied-weight diagnostic ---
+                tied_diag = {}
+                if embed_mod is not None:
+                    tied_diag["same_weight"] = int(embed_mod.weight is lm_head.weight)
+                    tied_diag["weights_equal"] = int(torch.equal(
+                        embed_mod.weight.data, lm_head.weight.data))
+                    tied_diag["same_grad"] = int(
+                        embed_mod.weight.grad is lm_head.weight.grad
+                    ) if (embed_mod.weight.grad is not None
+                          and lm_head.weight.grad is not None) else -1
+                    if lm_head.weight.grad is not None:
+                        tied_diag["lmhead_grad_norm"] = lm_head.weight.grad.float().norm().item()
+                    if embed_mod.weight.grad is not None:
+                        tied_diag["embed_grad_norm"] = embed_mod.weight.grad.float().norm().item()
+                stats["tied_diag"] = tied_diag
 
         # B. 还原有序的动量并计算正确的 EffLR
         if is_adam:
@@ -1830,6 +1850,12 @@ class DataParallelPPOActor(BasePPOActor):
         if embed_grad_diag and dist.get_rank() == 0:
             for k, v in embed_grad_diag.items():
                 analysis_metrics[f"analysis/embed_grad/{k}"] = v
+
+        # Log tied-weight diagnostic to wandb
+        if dist.get_rank() == 0:
+            tied_diag = stats_after.get("tied_diag", {})
+            for k, v in tied_diag.items():
+                analysis_metrics[f"analysis/tied/{k}"] = v
 
         return grad_norm, analysis_metrics
 
