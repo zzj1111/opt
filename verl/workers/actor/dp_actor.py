@@ -1817,18 +1817,22 @@ class DataParallelPPOActor(BasePPOActor):
                            or getattr(self.actor_module, "lm_head", None)
             fsdp_lmhead_g_norm = 0.0
             fsdp_embed_g_norm = 0.0
-            same_grad = -1  # -1 = unknown
+            same_grad = -1   # -1 = unknown
+            same_weight = -1
+            weights_equal = -1
             with FSDP.summon_full_params(self.actor_module, with_grads=True):
                 if rank == 0 and lm_head_fsdp is not None:
                     if lm_head_fsdp.weight.grad is not None:
                         fsdp_lmhead_g_norm = lm_head_fsdp.weight.grad.float().norm().item()
-                    # Also get embed_tokens grad via the same path for fair comparison
+                    # Also get embed_tokens via the same path for fair comparison
                     inner = getattr(getattr(self.actor_module, "module", self.actor_module), "model", None)
                     embed_fsdp = getattr(inner, "embed_tokens", None) if inner is not None else None
                     if embed_fsdp is not None and embed_fsdp.weight.grad is not None:
                         fsdp_embed_g_norm = embed_fsdp.weight.grad.float().norm().item()
-                    # Check if they share the same grad tensor
+                    # Check if they share the same grad / weight tensor
                     if embed_fsdp is not None and lm_head_fsdp is not None:
+                        same_weight = int(embed_fsdp.weight is lm_head_fsdp.weight)
+                        weights_equal = int(torch.equal(embed_fsdp.weight.data, lm_head_fsdp.weight.data))
                         embed_g = embed_fsdp.weight.grad
                         head_g = lm_head_fsdp.weight.grad
                         if embed_g is not None and head_g is not None:
@@ -1845,6 +1849,7 @@ class DataParallelPPOActor(BasePPOActor):
                       f"autograd_g_norm={autograd_g_norm:.6e}, "
                       f"fsdp_embed_g_norm={fsdp_embed_g_norm:.6e}, "
                       f"fsdp_lmhead_g_norm={fsdp_lmhead_g_norm:.6e}, "
+                      f"same_weight={same_weight}, weights_equal={weights_equal}, "
                       f"same_grad={same_grad}, "
                       f"tracker_g_norm={tracker_g_norm:.6e}, "
                       f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}]")
@@ -1852,6 +1857,8 @@ class DataParallelPPOActor(BasePPOActor):
                     "autograd_grad_norm": autograd_g_norm,
                     "fsdp_embed_grad_norm": fsdp_embed_g_norm,
                     "fsdp_lmhead_grad_norm": fsdp_lmhead_g_norm,
+                    "same_weight": same_weight,
+                    "weights_equal": weights_equal,
                     "same_grad": same_grad,
                     "tracker_grad_norm": tracker_g_norm,
                     "tracker_lm_head_g_norm": tracker_lm_g,
