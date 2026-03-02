@@ -411,8 +411,7 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
 
         # A. 还原参数和梯度
         # Also find embed_tokens for tied-weight diagnostic
-        inner_model = getattr(getattr(model, "module", model), "model", None)
-        embed_mod = getattr(inner_model, "embed_tokens", None) if inner_model is not None else None
+        embed_mod = getattr(model, "get_input_embeddings", lambda: None)()
 
         with FSDP.summon_full_params(model, with_grads=True):
             if rank == 0:
