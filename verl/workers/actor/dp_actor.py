@@ -1427,16 +1427,33 @@ class DataParallelPPOActor(BasePPOActor):
                 embed_mod = getattr(inner, "embed_tokens", None)
             if lm_head_mod is not None:
                 self._lm_head_tracker = LMHeadGradTracker(lm_head_mod, embed_module=embed_mod)
+
+                # Step 1: Check if embed_tokens and lm_head are the same object / storage
+                self._tied_diag = {}
+                has_both = (embed_mod is not None
+                            and hasattr(embed_mod, "weight")
+                            and hasattr(lm_head_mod, "weight"))
+                if has_both:
+                    same_obj = embed_mod.weight is lm_head_mod.weight
+                    same_ptr = embed_mod.weight.data_ptr() == lm_head_mod.weight.data_ptr()
+                    self._tied_diag["same_obj"] = int(same_obj)
+                    self._tied_diag["same_data_ptr"] = int(same_ptr)
+
                 if torch.distributed.get_rank() == 0:
                     embed_name = embed_mod.__class__.__name__ if embed_mod is not None else "None"
-                    same_weight = (embed_mod is not None
-                                   and hasattr(embed_mod, "weight")
-                                   and hasattr(lm_head_mod, "weight")
-                                   and embed_mod.weight is lm_head_mod.weight)
                     print(f"[Actor] LMHeadGradTracker registered on "
                           f"lm_head={lm_head_mod.__class__.__name__}, "
                           f"embed={embed_name}, "
-                          f"tied_weights={same_weight}")
+                          f"same_obj={self._tied_diag.get('same_obj')}, "
+                          f"same_data_ptr={self._tied_diag.get('same_data_ptr')}")
+
+                    # Step 2: Check for duplicate data_ptr in named_parameters
+                    seen_ptrs = {}
+                    for pname, p in base.named_parameters():
+                        ptr = p.data_ptr()
+                        if ptr in seen_ptrs:
+                            print(f"[Actor] DUPLICATE: {pname} shares storage with {seen_ptrs[ptr]}")
+                        seen_ptrs[ptr] = pname
 
         # --- Update analysis tracker (sparsity & effective rank, actor only) ---
         self._update_tracker = None
@@ -1822,6 +1839,18 @@ class DataParallelPPOActor(BasePPOActor):
                     "grad_ratio_tracker_over_fsdp": grad_ratio,
                 }
 
+        # --- Step 3: Snapshot embed/lm_head shards before optimizer step ---
+        _emb_before = None
+        _head_before = None
+        base_for_diag = getattr(self.actor_module, "module", self.actor_module)
+        inner_for_diag = getattr(base_for_diag, "model", base_for_diag)
+        _embed_w = getattr(getattr(inner_for_diag, "embed_tokens", None), "weight", None)
+        _head_w = getattr(getattr(base_for_diag, "lm_head", None), "weight", None)
+        if _embed_w is not None:
+            _emb_before = _embed_w.data.detach().clone()
+        if _head_w is not None and _head_w is not _embed_w:
+            _head_before = _head_w.data.detach().clone()
+
         # --- 执行更新 ---
         if self.scaler is not None:
             self.scaler.step(self.actor_optimizer)
@@ -1831,6 +1860,21 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.zero_grad()
             else:
                 self.actor_optimizer.step()
+
+        # --- Step 3 cont: Compare embed/lm_head after step ---
+        tied_step_diag = {}
+        if dist.get_rank() == 0 and _emb_before is not None:
+            emb_delta = (_embed_w.data.detach() - _emb_before).float().norm().item()
+            tied_step_diag["embed_delta"] = emb_delta
+            if _head_before is not None:
+                head_delta = (_head_w.data.detach() - _head_before).float().norm().item()
+                weights_equal = torch.equal(_embed_w.data, _head_w.data)
+                tied_step_diag["head_delta"] = head_delta
+                tied_step_diag["weights_equal"] = int(weights_equal)
+            else:
+                tied_step_diag["same_obj"] = 1
+            print(f"[TIED DIAG] {tied_step_diag}")
+        del _emb_before, _head_before
 
         # --- 分析 3: Post-Step ---
         stats_after = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
@@ -1919,6 +1963,16 @@ class DataParallelPPOActor(BasePPOActor):
         if embed_grad_diag and dist.get_rank() == 0:
             for k, v in embed_grad_diag.items():
                 analysis_metrics[f"analysis/embed_grad/{k}"] = v
+
+        # Log tied-weight diagnostic to wandb
+        if dist.get_rank() == 0:
+            # Init-time checks (logged every step so they appear on wandb timeline)
+            if hasattr(self, "_tied_diag") and self._tied_diag:
+                for k, v in self._tied_diag.items():
+                    analysis_metrics[f"analysis/tied/{k}"] = v
+            # Per-step delta checks
+            for k, v in tied_step_diag.items():
+                analysis_metrics[f"analysis/tied/{k}"] = v
 
         return grad_norm, analysis_metrics
 
