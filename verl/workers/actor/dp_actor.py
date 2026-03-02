@@ -1695,12 +1695,11 @@ class DataParallelPPOActor(BasePPOActor):
         if self.scaler is not None:
             self.scaler.unscale_(self.actor_optimizer)
 
-        # --- 分析 1: Pre-Clip ---
-        # 此时梯度是原始的，动量是旧的
-        stats_pre = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
-        if dist.get_rank() == 0:
-            print(f"\n[PRE-CLIP] Global Grad Norm: {stats_pre['global']['grad_norm']:.6f}")
-            # 如果需要，可以将 stats_pre 传给 wandb.log()
+        # NOTE: stats_pre (get_fsdp_comprehensive_analysis) moved to after
+        # optimizer.step() to test whether its get_ordered_full_matrix hack
+        # corrupts param.grad before clip/update.
+        # Pre-clip metrics temporarily unavailable.
+        stats_pre = {"global": {}}
 
         # --- 梯度裁剪 ---
         if isinstance(self.actor_module, FSDP):
