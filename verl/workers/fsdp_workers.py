@@ -438,7 +438,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
 
-        self.use_orig_params = fsdp_config.get("use_orig_params", True)
+        self.use_orig_params = fsdp_config.get("use_orig_params", False)
         if self.config.actor.get("freeze_vision_tower", False):
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is not None:

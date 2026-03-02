@@ -147,13 +147,8 @@ def _layer_sort_key(name):
 
 
 class LMHeadGradTracker:
-    """Capture the true gradient for the shared embed_tokens / lm_head weight
-    via module hooks, bypassing FSDP's reduce-scatter which corrupts
-    tied-weight gradients.
-
-    Captures both components of the tied-weight gradient:
-      - lm_head matmul:      dL/dW = dL/dY^T @ X           (dense)
-      - embedding lookup:    dL/dW[v] += dL/dE[i]  for i where ids[i]=v  (sparse)
+    """Capture the true lm_head gradient via module hooks, bypassing FSDP's
+    reduce-scatter which corrupts tied-weight gradients.
 
     Maintains its own Adam exp_avg / exp_avg_sq (on CPU, rank-0 only) so that
     per-token effective LR can be computed correctly.
@@ -162,33 +157,23 @@ class LMHeadGradTracker:
         2 x [vocab_size, hidden_size] x float32
         e.g. Qwen3-1.7B: 2 x 151936 x 2048 x 4 ≈ 2.4 GB CPU RAM
     Memory overhead (all ranks, GPU, temporary):
-        1~2 x [vocab_size, hidden_size] x float32 during forward/backward
+        1 x [vocab_size, hidden_size] x float32 during finalize_step
     """
 
-    def __init__(self, lm_head_module, embed_module=None):
-        self.grad_accum = None          # [V, H] lm_head matmul grad, GPU
-        self.embed_grad_accum = None    # [V, H] embed lookup grad, GPU
+    def __init__(self, lm_head_module):
+        self.grad_accum = None       # [V, H] float32, GPU, accumulated across micro-batches
         self.step_count = 0
-        self.exp_avg = None             # [V, H] float32, CPU, rank 0 only
-        self.exp_avg_sq = None          # [V, H] float32, CPU, rank 0 only
+        self.exp_avg = None          # [V, H] float32, CPU, rank 0 only
+        self.exp_avg_sq = None       # [V, H] float32, CPU, rank 0 only
 
-        # Only use forward hooks. Inside them we register *tensor-level* hooks
+        # Only use a forward hook. Inside it we register a *tensor-level* hook
         # on the output to capture grad_output during backward.
         # Module-level backward hooks (full_backward_hook / pre_hook) insert
         # custom autograd Functions that break downstream inplace ops (div_).
-        self._fwd_handle = lm_head_module.register_forward_hook(self._lm_head_fwd_hook)
-
-        self._has_embed = embed_module is not None
-        self._embed_fwd_handle = None
-        if embed_module is not None:
-            self._vocab_size = embed_module.weight.shape[0]
-            self._embed_fwd_handle = embed_module.register_forward_hook(
-                self._embed_fwd_hook
-            )
+        self._fwd_handle = lm_head_module.register_forward_hook(self._fwd_hook)
 
     # ------------------------------------------------------------------
-    def _lm_head_fwd_hook(self, module, input, output):
-        """Hook on lm_head: capture dL/dW = dL/dY^T @ X."""
+    def _fwd_hook(self, module, input, output):
         if not (module.training and torch.is_grad_enabled()):
             return
         saved_input = input[0].detach().clone()   # [*, H]
@@ -209,28 +194,6 @@ class LMHeadGradTracker:
         output.register_hook(_tensor_grad_hook)
 
     # ------------------------------------------------------------------
-    def _embed_fwd_hook(self, module, input, output):
-        """Hook on embed_tokens: capture dL/dW[v] = sum dL/dE[i] for ids[i]=v."""
-        if not (module.training and torch.is_grad_enabled()):
-            return
-        saved_ids = input[0].detach().clone()     # [*] int64
-        tracker = self
-
-        def _embed_tensor_grad_hook(grad):
-            # grad: [*, H]  gradient of loss w.r.t. embedding output
-            ids = saved_ids.reshape(-1)                                         # [N]
-            go = grad.detach().float().reshape(-1, grad.shape[-1])              # [N, H]
-            local_grad = torch.zeros(tracker._vocab_size, go.shape[1],
-                                     device=go.device, dtype=torch.float32)
-            local_grad.index_add_(0, ids, go)                                   # [V, H]
-            if tracker.embed_grad_accum is None:
-                tracker.embed_grad_accum = local_grad
-            else:
-                tracker.embed_grad_accum += local_grad
-
-        output.register_hook(_embed_tensor_grad_hook)
-
-    # ------------------------------------------------------------------
     def finalize_step(self, optimizer_pg, clip_ratio=1.0):
         """Call after grad-clip, before optimizer.step().
 
@@ -246,32 +209,16 @@ class LMHeadGradTracker:
         if self.grad_accum is None:
             return {}
 
-        # Reduce lm_head grad across ranks → rank 0  (collective)
+        # Reduce local gradients → rank 0  (collective, all ranks must call)
         dist.reduce(self.grad_accum, dst=0, op=dist.ReduceOp.SUM)
-
-        # Reduce embed lookup grad across ranks → rank 0  (collective)
-        if self._has_embed and self.embed_grad_accum is not None:
-            dist.reduce(self.embed_grad_accum, dst=0, op=dist.ReduceOp.SUM)
 
         stats = {}
         if rank == 0:
             lr = optimizer_pg["lr"]
             is_adam = "betas" in optimizer_pg
 
-            lm_grad = self.grad_accum.cpu().float() * clip_ratio
-
-            # Combine lm_head + embed_lookup for the full tied-weight gradient
-            embed_grad = None
-            if self._has_embed and self.embed_grad_accum is not None:
-                embed_grad = self.embed_grad_accum.cpu().float() * clip_ratio
-
-            if embed_grad is not None:
-                full_grad = lm_grad + embed_grad
-                stats["agg_lm_head_g_norm"] = lm_grad.norm().item()
-                stats["agg_embed_lookup_g_norm"] = embed_grad.norm().item()
-            else:
-                full_grad = lm_grad
-
+            # Move to CPU and apply the same clip ratio the optimizer saw
+            full_grad = self.grad_accum.cpu().float() * clip_ratio
             self.step_count += 1
 
             # --- per-token gradient norm ---
@@ -326,18 +273,13 @@ class LMHeadGradTracker:
                 stats["agg_eff_lr_mean"] = lr
                 stats["agg_numel"] = full_grad.numel()
 
-            del full_grad, lm_grad
-            if embed_grad is not None:
-                del embed_grad
+            del full_grad
 
-        self.grad_accum = None          # reset for next step (all ranks)
-        self.embed_grad_accum = None
+        self.grad_accum = None  # reset for next step (all ranks)
         return stats
 
     def remove_hooks(self):
         self._fwd_handle.remove()
-        if self._embed_fwd_handle is not None:
-            self._embed_fwd_handle.remove()
 
 
 @torch.no_grad()
@@ -1421,17 +1363,10 @@ class DataParallelPPOActor(BasePPOActor):
             lm_head_mod = getattr(base, "get_output_embeddings", lambda: None)()
             if lm_head_mod is None:
                 lm_head_mod = getattr(base, "lm_head", None)
-            embed_mod = getattr(base, "get_input_embeddings", lambda: None)()
-            if embed_mod is None:
-                inner = getattr(base, "model", base)
-                embed_mod = getattr(inner, "embed_tokens", None)
             if lm_head_mod is not None:
-                self._lm_head_tracker = LMHeadGradTracker(lm_head_mod, embed_module=embed_mod)
+                self._lm_head_tracker = LMHeadGradTracker(lm_head_mod)
                 if torch.distributed.get_rank() == 0:
-                    embed_name = embed_mod.__class__.__name__ if embed_mod is not None else "None"
-                    print(f"[Actor] LMHeadGradTracker registered on "
-                          f"lm_head={lm_head_mod.__class__.__name__}, "
-                          f"embed={embed_name}")
+                    print(f"[Actor] LMHeadGradTracker registered on {lm_head_mod.__class__.__name__}")
 
         # --- Update analysis tracker (sparsity & effective rank, actor only) ---
         self._update_tracker = None
@@ -1773,49 +1708,30 @@ class DataParallelPPOActor(BasePPOActor):
             )
 
         # --- Diagnose embed_tokens gradient before optimizer step ---
-        # All ranks participate so we can all_reduce to get the GLOBAL fsdp
-        # grad norm.  Tracker now captures both lm_head + embed_lookup, so
-        # tracker_grad_norm should match fsdp_grad_norm when FSDP is correct.
         embed_grad_diag = {}
-        if self._lm_head_tracker is not None:
+        if self._lm_head_tracker is not None and dist.get_rank() == 0:
             base = getattr(self.actor_module, "module", self.actor_module)
-            dev = torch.cuda.current_device()
-            # [squared_norm, nonzero_count, total_count]
-            local_stats = torch.zeros(3, device=dev, dtype=torch.float64)
             for pname, param in base.named_parameters():
                 if "embed_tokens" in pname and param.grad is not None:
-                    g = param.grad.detach().float()
-                    if isinstance(g, DTensor):
-                        g = g.to_local()
-                    local_stats[0] = g.pow(2).sum().double()
-                    local_stats[1] = (g.abs() > 1e-10).sum().double()
-                    local_stats[2] = float(g.numel())
+                    fsdp_grad = param.grad.detach().float()
+                    fsdp_g_norm = fsdp_grad.norm().item()
+                    fsdp_nonzero = (fsdp_grad.abs() > 1e-10).sum().item()
+                    fsdp_total = fsdp_grad.numel()
+                    tracker_g_norm = lm_head_stats.get("agg_g_norm", 0.0)
+                    fsdp_nonzero_pct = fsdp_nonzero / fsdp_total * 100
+                    grad_ratio = tracker_g_norm / max(fsdp_g_norm, 1e-30)
+                    print(f"[EMBED GRAD DIAG] fsdp_grad_norm={fsdp_g_norm:.6e}, "
+                          f"tracker_grad_norm={tracker_g_norm:.6e}, "
+                          f"fsdp_nonzero={fsdp_nonzero}/{fsdp_total} "
+                          f"({fsdp_nonzero_pct:.1f}%), "
+                          f"ratio(tracker/fsdp)={grad_ratio:.2f}")
+                    embed_grad_diag = {
+                        "fsdp_grad_norm": fsdp_g_norm,
+                        "tracker_grad_norm": tracker_g_norm,
+                        "fsdp_grad_nonzero_pct": fsdp_nonzero_pct,
+                        "grad_ratio_tracker_over_fsdp": grad_ratio,
+                    }
                     break
-            dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
-
-            if dist.get_rank() == 0:
-                fsdp_g_norm = local_stats[0].sqrt().item()
-                fsdp_nonzero = int(local_stats[1].item())
-                fsdp_total = int(local_stats[2].item())
-                tracker_g_norm = lm_head_stats.get("agg_g_norm", 0.0)
-                tracker_lm_g = lm_head_stats.get("agg_lm_head_g_norm", tracker_g_norm)
-                tracker_emb_g = lm_head_stats.get("agg_embed_lookup_g_norm", 0.0)
-                fsdp_nonzero_pct = fsdp_nonzero / max(fsdp_total, 1) * 100
-                grad_ratio = tracker_g_norm / max(fsdp_g_norm, 1e-30)
-                print(f"[EMBED GRAD DIAG] fsdp_grad_norm(global)={fsdp_g_norm:.6e}, "
-                      f"tracker_grad_norm(combined)={tracker_g_norm:.6e}, "
-                      f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}], "
-                      f"fsdp_nonzero={fsdp_nonzero}/{fsdp_total} "
-                      f"({fsdp_nonzero_pct:.1f}%), "
-                      f"ratio(tracker/fsdp)={grad_ratio:.2f}")
-                embed_grad_diag = {
-                    "fsdp_grad_norm": fsdp_g_norm,
-                    "tracker_grad_norm": tracker_g_norm,
-                    "tracker_lm_head_g_norm": tracker_lm_g,
-                    "tracker_embed_lookup_g_norm": tracker_emb_g,
-                    "fsdp_grad_nonzero_pct": fsdp_nonzero_pct,
-                    "grad_ratio_tracker_over_fsdp": grad_ratio,
-                }
 
         # --- 执行更新 ---
         if self.scaler is not None:
@@ -1853,8 +1769,8 @@ class DataParallelPPOActor(BasePPOActor):
             # NOTE: With use_orig_params=True, FSDP correctly handles tied-weight
             # gradients, so embed_tokens' g_norm/m_norm/eff_lr_mean from
             # get_fsdp_comprehensive_analysis are already correct (combined
-            # embedding + lm_head). The tracker now also captures both
-            # components, so its agg_g_norm should match FSDP's when correct.
+            # embedding + lm_head). Do NOT overwrite them with tracker values
+            # (which only capture the lm_head portion).
 
         if dist.get_rank() == 0:
             print(f"[POST-STEP] Global Momentum Norm: {stats_after['global']['mom_norm']:.6f}")
