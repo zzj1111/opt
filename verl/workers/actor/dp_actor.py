@@ -1429,6 +1429,16 @@ class DataParallelPPOActor(BasePPOActor):
                 self._lm_head_tracker = LMHeadGradTracker(lm_head_mod, embed_module=embed_mod)
                 self._tied_diag = {}
 
+                # Register hook on embed_tokens param (via named_parameters, safe)
+                # to capture autograd gradient BEFORE FSDP reduce-scatter.
+                self._autograd_embed_grad_sq = None
+                for pname, p in base.named_parameters():
+                    if "embed_tokens" in pname:
+                        def _autograd_hook(grad, ref=self):
+                            ref._autograd_embed_grad_sq = grad.detach().norm().pow(2).item()
+                        p.register_hook(_autograd_hook)
+                        break
+
                 if torch.distributed.get_rank() == 0:
                     embed_name = embed_mod.__class__.__name__ if embed_mod is not None else "None"
                     # Check for duplicate data_ptr in named_parameters
@@ -1788,49 +1798,64 @@ class DataParallelPPOActor(BasePPOActor):
                 clip_ratio=clip_ratio,
             )
 
-        # --- Diagnose embed_tokens gradient before optimizer step ---
-        # All ranks participate so we can all_reduce to get the GLOBAL fsdp
-        # grad norm.  Tracker now captures both lm_head + embed_lookup, so
-        # tracker_grad_norm should match fsdp_grad_norm when FSDP is correct.
+        # --- Diagnose tied-weight gradients before optimizer step ---
         embed_grad_diag = {}
         if self._lm_head_tracker is not None:
-            base = getattr(self.actor_module, "module", self.actor_module)
             dev = torch.cuda.current_device()
-            # [squared_norm, nonzero_count, total_count]
-            local_stats = torch.zeros(3, device=dev, dtype=torch.float64)
-            for pname, param in base.named_parameters():
-                if "embed_tokens" in pname and param.grad is not None:
-                    g = param.grad.detach().float()
-                    if isinstance(g, DTensor):
-                        g = g.to_local()
-                    local_stats[0] = g.pow(2).sum().double()
-                    local_stats[1] = (g.abs() > 1e-10).sum().double()
-                    local_stats[2] = float(g.numel())
-                    break
-            dist.all_reduce(local_stats, op=dist.ReduceOp.SUM)
+            rank = dist.get_rank()
 
-            if dist.get_rank() == 0:
-                fsdp_g_norm = local_stats[0].sqrt().item()
-                fsdp_nonzero = int(local_stats[1].item())
-                fsdp_total = int(local_stats[2].item())
+            # Collect autograd hook grad norm (before FSDP reduce)
+            autograd_stats = torch.zeros(1, device=dev, dtype=torch.float64)
+            if self._autograd_embed_grad_sq is not None:
+                autograd_stats[0] = self._autograd_embed_grad_sq
+                self._autograd_embed_grad_sq = None
+            dist.all_reduce(autograd_stats, op=dist.ReduceOp.SUM)
+
+            # Access lm_head grad via FSDP-wrapped model + summon_full_params
+            # (safe path that doesn't OOM, same as get_fsdp_comprehensive_analysis)
+            lm_head_fsdp = getattr(self.actor_module, "get_output_embeddings", lambda: None)() \
+                           or getattr(self.actor_module, "lm_head", None)
+            fsdp_lmhead_g_norm = 0.0
+            fsdp_embed_g_norm = 0.0
+            same_grad = -1  # -1 = unknown
+            with FSDP.summon_full_params(self.actor_module, with_grads=True):
+                if rank == 0 and lm_head_fsdp is not None:
+                    if lm_head_fsdp.weight.grad is not None:
+                        fsdp_lmhead_g_norm = lm_head_fsdp.weight.grad.float().norm().item()
+                    # Also get embed_tokens grad via the same path for fair comparison
+                    inner = getattr(getattr(self.actor_module, "module", self.actor_module), "model", None)
+                    embed_fsdp = getattr(inner, "embed_tokens", None) if inner is not None else None
+                    if embed_fsdp is not None and embed_fsdp.weight.grad is not None:
+                        fsdp_embed_g_norm = embed_fsdp.weight.grad.float().norm().item()
+                    # Check if they share the same grad tensor
+                    if embed_fsdp is not None and lm_head_fsdp is not None:
+                        embed_g = embed_fsdp.weight.grad
+                        head_g = lm_head_fsdp.weight.grad
+                        if embed_g is not None and head_g is not None:
+                            same_grad = int(embed_g is head_g)
+                        elif embed_g is None and head_g is None:
+                            same_grad = 1
+
+            if rank == 0:
+                autograd_g_norm = autograd_stats[0].sqrt().item()
                 tracker_g_norm = lm_head_stats.get("agg_g_norm", 0.0)
                 tracker_lm_g = lm_head_stats.get("agg_lm_head_g_norm", tracker_g_norm)
                 tracker_emb_g = lm_head_stats.get("agg_embed_lookup_g_norm", 0.0)
-                fsdp_nonzero_pct = fsdp_nonzero / max(fsdp_total, 1) * 100
-                grad_ratio = tracker_g_norm / max(fsdp_g_norm, 1e-30)
-                print(f"[EMBED GRAD DIAG] fsdp_grad_norm(global)={fsdp_g_norm:.6e}, "
-                      f"tracker_grad_norm(combined)={tracker_g_norm:.6e}, "
-                      f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}], "
-                      f"fsdp_nonzero={fsdp_nonzero}/{fsdp_total} "
-                      f"({fsdp_nonzero_pct:.1f}%), "
-                      f"ratio(tracker/fsdp)={grad_ratio:.2f}")
+                print(f"[EMBED GRAD DIAG] "
+                      f"autograd_g_norm={autograd_g_norm:.6e}, "
+                      f"fsdp_embed_g_norm={fsdp_embed_g_norm:.6e}, "
+                      f"fsdp_lmhead_g_norm={fsdp_lmhead_g_norm:.6e}, "
+                      f"same_grad={same_grad}, "
+                      f"tracker_g_norm={tracker_g_norm:.6e}, "
+                      f"[lm_head={tracker_lm_g:.6e}, embed_lookup={tracker_emb_g:.6e}]")
                 embed_grad_diag = {
-                    "fsdp_grad_norm": fsdp_g_norm,
+                    "autograd_grad_norm": autograd_g_norm,
+                    "fsdp_embed_grad_norm": fsdp_embed_g_norm,
+                    "fsdp_lmhead_grad_norm": fsdp_lmhead_g_norm,
+                    "same_grad": same_grad,
                     "tracker_grad_norm": tracker_g_norm,
                     "tracker_lm_head_g_norm": tracker_lm_g,
                     "tracker_embed_lookup_g_norm": tracker_emb_g,
-                    "fsdp_grad_nonzero_pct": fsdp_nonzero_pct,
-                    "grad_ratio_tracker_over_fsdp": grad_ratio,
                 }
 
         # --- Step 3: Snapshot embed shard before optimizer step ---
