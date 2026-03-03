@@ -5,7 +5,7 @@
 # All experiments are placed under a single sweep directory for easy download.
 #
 # Usage:
-#   bash examples/grpo_trainer/sweep_numina_cot.sh [--tmux SESSION_NAME] [--note NOTE] [--model-dtype fp32|bf16]
+#   bash examples/grpo_trainer/sweep_numina_cot.sh [--tmux SESSION_NAME] [--note NOTE] [--model-dtype fp32|bf16] [--model MODEL]
 #
 # The script will:
 #   1. Create a sweep directory: checkpoints/sweep_numina_MMDD/
@@ -27,13 +27,14 @@ while [[ $# -gt 0 ]]; do
         --tmux) TMUX_NAME="$2"; shift 2 ;;
         --note) NOTE="$2"; shift 2 ;;
         --model-dtype) MODEL_DTYPE="$2"; shift 2 ;;
+        --model) MODEL="$2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
 # ===================== EDIT YOUR SWEEP GRID HERE =====================
 GPUS="0,1,2,3,4,5,6,7"
-MODEL="Qwen/Qwen3-1.7B"
+MODEL="${MODEL:-Qwen/Qwen3-1.7B}"
 DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 
 # --- AdamW grid ---
@@ -101,7 +102,7 @@ if [[ -z "$TMUX" ]]; then
         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
          cd $PROJ_DIR && \
-         bash $SCRIPT_DIR/sweep_numina_cot.sh --tmux $TMUX_NAME --note $NOTE --model-dtype $MODEL_DTYPE; \
+         bash $SCRIPT_DIR/sweep_numina_cot.sh --tmux $TMUX_NAME --note $NOTE --model-dtype $MODEL_DTYPE --model $MODEL; \
          exec bash"
     echo "Sweep started in tmux session '$TMUX_NAME'. Attach with: tmux attach -t $TMUX_NAME"
     exit 0
