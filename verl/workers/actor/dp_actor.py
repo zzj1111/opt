@@ -1143,7 +1143,8 @@ class UpdateAnalysisTracker:
                 snap = self._init_sharded[name]
                 live = param.detach().cpu().float()
                 snap_f = snap.float()
-                max_diff = (live - snap_f).abs().max().item()
+                diff = (live - snap_f).abs()
+                max_diff = diff.max().item() if diff.numel() > 0 else 0.0
                 print(f"[UpdateAnalysisTracker] INIT CHECK embed_tokens shard: "
                       f"max|live-snap|={max_diff:.2e}, "
                       f"live_dtype={param.dtype}, snap_dtype={snap.dtype}, "
