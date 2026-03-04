@@ -1201,7 +1201,7 @@ class UpdateAnalysisTracker:
                 accum[idx, 1] += total
 
             # Collect embed_tokens diagnostics
-            if "embed_tokens" in name:
+            if "embed_tokens" in name and abs_diff.numel() > 0:
                 embed_diag[0] = max(embed_diag[0].item(), abs_diff.max().item())
                 embed_diag[1] += abs_diff.sum()
                 embed_diag[2] += (abs_diff > 1e-6).sum()
