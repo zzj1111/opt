@@ -1376,17 +1376,21 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             self.scaler = None
 
-        # --- LM-Head gradient tracker (actor only) ---
+        # --- LM-Head gradient tracker (actor only, tied models only) ---
         self._lm_head_tracker = None
         if actor_optimizer is not None:
             base = _unwrap_model(actor_module)
-            lm_head_mod = getattr(base, "get_output_embeddings", lambda: None)()
-            if lm_head_mod is None:
-                lm_head_mod = getattr(base, "lm_head", None)
-            if lm_head_mod is not None:
-                self._lm_head_tracker = LMHeadGradTracker(lm_head_mod)
-                if torch.distributed.get_rank() == 0:
-                    print(f"[Actor] LMHeadGradTracker registered on {lm_head_mod.__class__.__name__}")
+            tied = getattr(getattr(base, "config", None), "tie_word_embeddings", True)
+            if tied:
+                lm_head_mod = getattr(base, "get_output_embeddings", lambda: None)()
+                if lm_head_mod is None:
+                    lm_head_mod = getattr(base, "lm_head", None)
+                if lm_head_mod is not None:
+                    self._lm_head_tracker = LMHeadGradTracker(lm_head_mod)
+                    if torch.distributed.get_rank() == 0:
+                        print(f"[Actor] LMHeadGradTracker registered on {lm_head_mod.__class__.__name__}")
+            elif torch.distributed.get_rank() == 0:
+                print("[Actor] tie_word_embeddings=False, skipping LMHeadGradTracker & tied diagnostics")
 
         # --- Update analysis tracker (sparsity & effective rank, actor only) ---
         self._update_tracker = None
