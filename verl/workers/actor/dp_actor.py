@@ -397,8 +397,15 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     if lm_head is not None:
         shard_w = lm_head.weight
         orig_grad = shard_w.grad # 备份
-        
+
+        # Check if weights are tied (untied models have uneven shards → deadlock risk)
+        base_model = getattr(model, "module", model)
+        is_tied = getattr(getattr(base_model, "config", None), "tie_word_embeddings", True)
+
         # 内部工具：利用 FSDP 官方 summon 逻辑还原有序矩阵
+        # WARNING: only safe for tied models where all ranks have non-empty shards.
+        # For untied models, optimizer.state may only exist on some ranks, causing
+        # summon_full_params (collective) to deadlock.
         def get_ordered_full_matrix(state_key):
             if shard_w not in optimizer.state: return None
             # 临时将状态存入 grad 位，利用 FSDP 索引图还原
@@ -420,9 +427,9 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 if lm_head.weight.grad is not None:
                     stats["last_layer"]["g_norm"] = lm_head.weight.grad.norm(dim=1).cpu().tolist()
 
-                # --- Tied-weight diagnostic ---
+                # --- Tied-weight diagnostic (only meaningful for tied models) ---
                 tied_diag = {}
-                if embed_mod is not None:
+                if is_tied and embed_mod is not None:
                     tied_diag["same_weight"] = int(embed_mod.weight is lm_head.weight)
                     tied_diag["weights_equal"] = int(torch.equal(
                         embed_mod.weight.data, lm_head.weight.data))
@@ -437,28 +444,32 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                 stats["tied_diag"] = tied_diag
 
         # B. 还原有序的动量并计算正确的 EffLR
-        if is_adam:
-            full_m = get_ordered_full_matrix("exp_avg")
-            full_v = get_ordered_full_matrix("exp_avg_sq")
+        # Skip for untied models: lm_head has uneven shards across ranks,
+        # so optimizer.state may not exist on all ranks, causing
+        # get_ordered_full_matrix's summon_full_params to deadlock.
+        if is_tied:
+            if is_adam:
+                full_m = get_ordered_full_matrix("exp_avg")
+                full_v = get_ordered_full_matrix("exp_avg_sq")
 
-            if rank == 0 and full_m is not None and full_v is not None:
-                step = optimizer.state[shard_w].get("step")
-                if isinstance(step, torch.Tensor): step = step.float().mean().item()
-                bc1, bc2 = 1 - beta1**step, 1 - beta2**step
+                if rank == 0 and full_m is not None and full_v is not None:
+                    step = optimizer.state[shard_w].get("step")
+                    if isinstance(step, torch.Tensor): step = step.float().mean().item()
+                    bc1, bc2 = 1 - beta1**step, 1 - beta2**step
 
-                full_v.sqrt_().div_(bc2**0.5).add_(eps)
-                full_elr = (lr / bc1) / full_v
+                    full_v.sqrt_().div_(bc2**0.5).add_(eps)
+                    full_elr = (lr / bc1) / full_v
 
-                stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
-                stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
-                del full_m, full_v, full_elr
-        else:
-            full_m = get_ordered_full_matrix("momentum_buffer")
-            if rank == 0 and full_m is not None:
-                stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
-                # SGD: effective LR is constant for all tokens
-                stats["last_layer"]["eff_lr_cls_mean"] = [lr] * full_m.shape[0]
-                del full_m
+                    stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
+                    stats["last_layer"]["eff_lr_cls_mean"] = full_elr.mean(dim=1).cpu().tolist()
+                    del full_m, full_v, full_elr
+            else:
+                full_m = get_ordered_full_matrix("momentum_buffer")
+                if rank == 0 and full_m is not None:
+                    stats["last_layer"]["mom_cls_norm"] = full_m.norm(dim=1).cpu().tolist()
+                    # SGD: effective LR is constant for all tokens
+                    stats["last_layer"]["eff_lr_cls_mean"] = [lr] * full_m.shape[0]
+                    del full_m
 
         shard_w.grad = orig_grad # 还原现场
         
