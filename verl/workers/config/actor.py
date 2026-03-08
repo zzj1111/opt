@@ -282,6 +282,9 @@ class FSDPActorConfig(ActorConfig):
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     use_rollout_log_probs: bool = False
 
+    # >>>>>>>>>>>>>>>>>
+    freeze_largest: bool = False    
+
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
         super().__post_init__()
