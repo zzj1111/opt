@@ -538,6 +538,45 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
 
+        # >>>>>>>>>>>>>>>>>>>>>>
+
+        flag_value = OmegaConf.select(self.config, "actor.freeze_largest") or False
+
+        if flag_value:
+
+            print("FREEZING LARGEST 95% weights !!!!!!!!!!!!!!!!!!!!!!!!!")
+
+            freeze_ratio = 0.95        # fraction of largest weights to freeze
+            min_tensor_size = 10_000   # skip tiny tensors
+
+            for name, p in actor_module_fsdp.named_parameters():
+                if p.ndim == 0 or p.numel() < min_tensor_size:
+                    if self.rank == 0:
+                        print(f"SKIP (small tensor): {name}, size={p.numel()}")
+                    continue
+
+                with torch.no_grad():
+                    # flatten parameter
+                    w = p.detach().abs().view(-1)
+                    k = max(int(w.numel() * freeze_ratio), 1)
+                    k = min(k, w.numel())
+                    topk_vals, _ = torch.topk(w, k, largest=True)
+                    threshold = topk_vals.min()
+                    # True = trainable, False = frozen
+                    mask = (p.detach().abs() < threshold).to(p.device).to(torch.bool)
+
+                # attach mask directly to the parameter
+                p._freeze_mask = mask
+
+                if self.rank == 0:
+                    trainable_frac = mask.float().mean().item()
+                    print(f"{name} trainable fraction: {trainable_frac:.3f}")
+                
+        
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+        
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 
