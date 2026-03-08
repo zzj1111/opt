@@ -1767,6 +1767,20 @@ class DataParallelPPOActor(BasePPOActor):
                     }
                     break
 
+        # >>>>>>>>>>>>>>>>>>>>>>
+        
+        flag_value = getattr(self.config, "freeze_largest", False)
+ 
+        if flag_value:
+            # zero out frozen weights
+            for group in self.actor_optimizer.param_groups:
+                for p in group["params"]:
+                    if hasattr(p, "_freeze_mask") and p.grad is not None:
+                        p.grad *= p._freeze_mask
+
+        # >>>>>>>>>>>>>>>>>>>>>>
+
+        
         # --- 执行更新 ---
         if self.scaler is not None:
             self.scaler.step(self.actor_optimizer)
