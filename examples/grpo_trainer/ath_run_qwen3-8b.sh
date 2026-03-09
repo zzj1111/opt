@@ -70,23 +70,23 @@ else
     mkdir -p "$CKPT_ROOT/$EXP_NAME"
 fi
 
-# # If not inside tmux, launch a tmux session and re-run this script inside it
-# if [[ -z "$TMUX" ]]; then
-#     TMUX_SESSION="train_${EXP_NAME}"
-#     # Build the full command to re-run inside tmux
-#     ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --ckpt-root $CKPT_ROOT"
-#     if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
-#     for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
+# If not inside tmux, launch a tmux session and re-run this script inside it
+if [[ -z "$TMUX" ]]; then
+    TMUX_SESSION="train_${EXP_NAME}"
+    # Build the full command to re-run inside tmux
+    ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --ckpt-root $CKPT_ROOT"
+    if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
+    for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
 
-#     tmux new-session -d -s "$TMUX_SESSION" \
-#         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
-#          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
-#          cd $PROJ_DIR && \
-#          bash $SCRIPT_DIR/run_qwen3-8b.sh $ARGS; \
-#          exec bash"
-#     echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
-#     exit 0
-# fi
+    tmux new-session -d -s "$TMUX_SESSION" \
+        "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
+         conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
+         cd $PROJ_DIR && \
+         bash $SCRIPT_DIR/run_qwen3-8b.sh $ARGS; \
+         exec bash"
+    echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
+    exit 0
+fi
 
 export CUDA_VISIBLE_DEVICES=$GPUS
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
@@ -142,7 +142,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl_grpo_example_gsm8k' \
+    trainer.project_name='verl_grpo_numina_cot' \
     trainer.experiment_name="$EXP_NAME" \
     trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
     trainer.n_gpus_per_node=$NGPUS \
