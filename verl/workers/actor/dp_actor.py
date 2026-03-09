@@ -65,9 +65,9 @@ def resolve_last_layer_param(
     prefer_output_embeddings: bool = True,
 ) -> tuple[torch.nn.Parameter, bool]:
     """
-    返回:
-      last_param: 语义上的“最后一层输出头权重”参数对象（Parameter）
-      tied: 是否与 input embedding 权重共享（weight tying）
+    Returns:
+      last_param: The output head weight parameter (semantically the "last layer").
+      tied: Whether it shares weights with the input embedding (weight tying).
     """
     base = _unwrap_model(model)
 
@@ -84,7 +84,7 @@ def resolve_last_layer_param(
         if inp is not None and hasattr(inp, "weight"):
             in_w = inp.weight
 
-    # 兜底：常见命名
+    # Fallback: common attribute names
     if out_w is None:
         for attr in ("lm_head", "classifier", "score", "head", "fc", "output"):
             if hasattr(base, attr):
@@ -102,27 +102,27 @@ def resolve_last_layer_param(
 
 def get_optimizer_step(optimizer):
     """
-    安全地从优化器中获取当前的 step 数。
-    兼容 FSDP、DDP 以及普通的单卡训练。
+    Safely retrieve the current step count from the optimizer.
+    Compatible with FSDP, DDP, and single-GPU training.
     """
-    # 1. 遍历所有参数组
+    # 1. Iterate over all parameter groups
     for group in optimizer.param_groups:
         for p in group['params']:
-            # 2. 检查这个参数是否有状态
+            # 2. Check if this parameter has optimizer state
             if p in optimizer.state:
                 state = optimizer.state[p]
                 
-                # 3. 检查是否有 'step' 键 (有些参数可能被冻结，没有 step)
+                # 3. Check for 'step' key (some frozen params may not have it)
                 if 'step' in state:
                     step_val = state['step']
                     
-                    # 4. 关键处理：PyTorch 版本差异
-                    # 有时候 step 是 int，有时候是 Tensor (在开启 capturable=True 时)
+                    # 4. Handle PyTorch version differences:
+                    # step can be int or Tensor (when capturable=True)
                     if isinstance(step_val, torch.Tensor):
                         return int(step_val.item())
                     return int(step_val)
                     
-    # 如果遍历完都没找到（比如刚初始化还没 step，或者 optimizer 是空的）
+    # Not found (e.g. just initialized, no step yet, or optimizer is empty)
     return 0
 
 
@@ -287,14 +287,14 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
     stats = {"global": {}, "last_layer": {}, "per_layer": {}}
     rank = dist.get_rank()
 
-    # 1. 获取优化器超参数
+    # 1. Get optimizer hyperparameters
     pg = optimizer.param_groups[0]
     lr = pg['lr']
     eps = pg.get('eps', 1e-8)
     beta1, beta2 = pg.get('betas', (0.0, 0.0))
     is_adam = 'betas' in pg  # Adam-family vs SGD-family
 
-    # 2. 全局统计 + per-layer 统计
+    # 2. Global stats + per-layer stats
     # Discover layer groups first
     base_model = getattr(model, "module", model)
     layer_groups = {}  # group_name -> index
@@ -392,23 +392,23 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
         stats["per_layer"]["m_norm"].append(per_layer_accum[i, 2].sqrt().item())
         stats["per_layer"]["eff_lr_mean"].append((per_layer_accum[i, 3] / n).item() if n > 0 else 0.0)
 
-    # 3. 最后一层 (LM_Head) 
+    # 3. Last layer (LM_Head)
     lm_head = getattr(model, "get_output_embeddings", lambda: None)() or getattr(model, "lm_head", None)
     if lm_head is not None:
         shard_w = lm_head.weight
-        orig_grad = shard_w.grad # 备份
+        orig_grad = shard_w.grad  # backup
 
         # Check if weights are tied (untied models have uneven shards → deadlock risk)
         base_model = getattr(model, "module", model)
         is_tied = getattr(getattr(base_model, "config", None), "tie_word_embeddings", True)
 
-        # 内部工具：利用 FSDP 官方 summon 逻辑还原有序矩阵
+        # Internal utility: use FSDP's summon logic to reconstruct the ordered matrix
         # WARNING: only safe for tied models where all ranks have non-empty shards.
         # For untied models, optimizer.state may only exist on some ranks, causing
         # summon_full_params (collective) to deadlock.
         def get_ordered_full_matrix(state_key):
             if shard_w not in optimizer.state: return None
-            # 临时将状态存入 grad 位，利用 FSDP 索引图还原
+            # Temporarily store state in grad slot, using FSDP's index map to reconstruct
             shard_w.grad = optimizer.state[shard_w][state_key].to(shard_w.dtype)
             full_matrix = None
             with FSDP.summon_full_params(model, with_grads=True):
@@ -416,7 +416,7 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                     full_matrix = lm_head.weight.grad.clone().float()
             return full_matrix
 
-        # A. 还原参数和梯度
+        # A. Reconstruct parameters and gradients
         # Also find embed_tokens for tied-weight diagnostic
         embed_mod = getattr(model, "get_input_embeddings", lambda: None)()
 
@@ -443,7 +443,7 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                         tied_diag["embed_grad_norm"] = embed_mod.weight.grad.float().norm().item()
                 stats["tied_diag"] = tied_diag
 
-        # B. 还原有序的动量并计算正确的 EffLR
+        # B. Reconstruct ordered momentum and compute correct EffLR
         # Skip for untied models: lm_head has uneven shards across ranks,
         # so optimizer.state may not exist on all ranks, causing
         # get_ordered_full_matrix's summon_full_params to deadlock.
@@ -471,7 +471,7 @@ def get_fsdp_comprehensive_analysis(model, optimizer, rms_norm=False):
                     stats["last_layer"]["eff_lr_cls_mean"] = [lr] * full_m.shape[0]
                     del full_m
 
-        shard_w.grad = orig_grad # 还原现场
+        shard_w.grad = orig_grad  # restore original
         
     return stats
 
@@ -617,17 +617,17 @@ def compute_grad_momentum_norms_fsdp_safe(
 
 def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plot_every=10, token_freq=None):
     """
-    功能：
-    1. 将 stats['global']（及 stats_pre['global']）按梯度步追加到 JSONL 文件
-    2. 将 stats['last_layer'] 保存为本地 .pt 文件
-    3. 每隔 plot_every 个梯度步，从 JSONL 生成趋势图
-    注意：只有主进程 (Rank 0) 执行此操作
+    Functionality:
+    1. Append stats['global'] (and stats_pre['global']) to a JSONL file per gradient step
+    2. Save stats['last_layer'] as a local .pt file
+    3. Generate trend plots from JSONL every plot_every gradient steps
+    Note: Only the main process (Rank 0) executes this
     """
     if not dist.is_initialized() or dist.get_rank() == 0:
 
         os.makedirs(save_dir, exist_ok=True)
 
-        # --- A. 按梯度步追加标量到 JSONL ---
+        # --- A. Append scalars to JSONL per gradient step ---
         import json
         record = {"grad_step": step}
         for k, v in stats["global"].items():
@@ -639,7 +639,7 @@ def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plo
         with open(jsonl_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
-        # --- B. 本地保存 (Last Layer Vectors) ---
+        # --- B. Local save (Last Layer Vectors) ---
         if "last_layer" in stats and stats["last_layer"]:
             file_path = os.path.join(save_dir, f"layer_stats_step_{step:05d}.pt")
             save_payload = {}
@@ -665,7 +665,7 @@ def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plo
             with open(pl_jsonl_path, "a") as f:
                 f.write(json.dumps(pl_record) + "\n")
 
-        # --- C. 定期绘图 ---
+        # --- C. Periodic plotting ---
         if step % plot_every == 0:
             _plot_grad_step_metrics(jsonl_path, save_dir)
             pl_jsonl = os.path.join(save_dir, "per_layer_metrics.jsonl")
@@ -677,14 +677,14 @@ def log_fsdp_analysis(stats, step, save_dir="analysis_logs", stats_pre=None, plo
 
 
 def _plot_grad_step_metrics(jsonl_path, save_dir):
-    """从 JSONL 读取按梯度步记录的标量，绘制趋势图并保存到 save_dir/plots/"""
+    """Read per-gradient-step scalars from JSONL, plot trends and save to save_dir/plots/"""
     import json
 
     import matplotlib
-    matplotlib.use("Agg")  # 无头模式，不需要 GUI
+    matplotlib.use("Agg")  # headless mode, no GUI needed
     import matplotlib.pyplot as plt
 
-    # 读取所有记录
+    # Read all records
     records = []
     with open(jsonl_path, "r") as f:
         for line in f:
@@ -695,12 +695,12 @@ def _plot_grad_step_metrics(jsonl_path, save_dir):
         return
 
     steps = [r["grad_step"] for r in records]
-    # 收集所有 metric key（除 grad_step 外）
+    # Collect all metric keys (except grad_step)
     all_keys = [k for k in records[0] if k != "grad_step"]
 
-    # 按前缀分组绘制子图：
-    #   组1: 范数类 (param_norm, grad_norm, mom_norm, pre_clip_*)
-    #   组2: 学习率类 (eff_lr_mean, pre_clip_eff_lr_mean)
+    # Group by prefix for subplots:
+    #   Group 1: norms (param_norm, grad_norm, mom_norm, pre_clip_*)
+    #   Group 2: learning rates (eff_lr_mean, pre_clip_eff_lr_mean)
     norm_keys = [k for k in all_keys if "norm" in k]
     lr_keys = [k for k in all_keys if "lr" in k]
 
@@ -733,7 +733,7 @@ def _plot_grad_step_metrics(jsonl_path, save_dir):
                 "Effective Learning Rate  (per gradient step)",
                 "Effective LR", use_log=True)
 
-    # 额外画一张 pre-clip vs post-clip grad_norm 对比图
+    # Additional plot: pre-clip vs post-clip grad_norm comparison
     pre_grad = [r.get("pre_clip_grad_norm", None) for r in records]
     post_grad = [r.get("grad_norm", None) for r in records]
     if pre_grad[0] is not None:
@@ -749,9 +749,9 @@ def _plot_grad_step_metrics(jsonl_path, save_dir):
         fig.savefig(os.path.join(plot_dir, "grad_clip_comparison.png"), dpi=150)
         plt.close(fig)
 
-    # --- param_norm 变化量图 ---
-    # param_norm 绝对值很大但变化极小，直接画看起来像定值
-    # 这里画 delta（相邻步差值）和相对变化率，让微小变化可见
+    # --- param_norm delta plot ---
+    # param_norm has large absolute values but tiny changes, so plotting it directly looks flat.
+    # Plot delta (adjacent step difference) and relative change rate to reveal small changes.
     param_norm_vals = [r.get("param_norm", None) for r in records]
     if param_norm_vals[0] is not None and len(param_norm_vals) >= 2:
         deltas = [param_norm_vals[i] - param_norm_vals[i - 1] for i in range(1, len(param_norm_vals))]
@@ -1636,9 +1636,9 @@ class DataParallelPPOActor(BasePPOActor):
     #             self.scaler.unscale_(self.actor_optimizer)
 
     #         # -------------------------------------------------------------
-    #         # Analysis 1: Pre-Clip (重点关注: 原始梯度分布)
+    #         # Analysis 1: Pre-Clip (focus: raw gradient distribution)
     #         # -------------------------------------------------------------
-    #         # 建议设置打印频率，例如每 1 步或 10 步，避免刷屏
+    #         # Suggest setting print frequency, e.g. every 1 or 10 steps, to avoid flooding
     #         debug_log = (dist.get_rank() == 0) # and (self.global_step % 10 == 0)
             
     #         stats_pre = get_fsdp_comprehensive_analysis(
@@ -1669,12 +1669,12 @@ class DataParallelPPOActor(BasePPOActor):
     #             grad_norm = grad_norm.full_tensor()
 
     #         # -------------------------------------------------------------
-    #         # Analysis 2: Post-Clip (重点关注: 全局梯度是否被截断)
+    #         # Analysis 2: Post-Clip (focus: whether global gradient was clipped)
     #         # -------------------------------------------------------------
-    #         # 这里我们只做一个简单的全局检查，节省时间，不再做 LM_Head 分析
-    #         # 如果你想做全套，直接调 get_fsdp_comprehensive_analysis 也可以
+    #         # Simple global check only, saving time. Skip LM_Head analysis.
+    #         # For full analysis, call get_fsdp_comprehensive_analysis directly.
             
-    #         # 简易版：只看 Global Grad
+    #         # Simplified: only check Global Grad
     #         if debug_log:
     #             print(f"[Step {self.global_step} POST-CLIP] Target Clip={self.config.grad_clip}, Actual Norm={float(grad_norm):.4f}")
 
@@ -1691,14 +1691,14 @@ class DataParallelPPOActor(BasePPOActor):
     #             else:
     #                 self.actor_optimizer.step()
             
-    #         # 注意: 你的原代码逻辑似乎没有在 step 后清零梯度，如果外部有 zero_grad 则无视这里
+    #         # Note: the original code does not zero gradients after step; ignore if zero_grad is called externally
     #         # print("grad_norm_detected:", grad_norm)
 
     #         # -------------------------------------------------------------
-    #         # Analysis 3: Post-Step (重点关注: 参数更新后的状态，如新 Momentum)
+    #         # Analysis 3: Post-Step (focus: post-update state, e.g. new Momentum)
     #         # -------------------------------------------------------------
-    #         # 训练结束后，参数变了，Momentum 变了。
-    #         # 如果资源非常充足，可以再跑一次完整分析看看 update 后的情况
+    #         # After the step, params and momentum have changed.
+    #         # If resources allow, run a full analysis to inspect post-update state.
             
     #         stats_after = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
     #         if debug_log:
@@ -1717,7 +1717,7 @@ class DataParallelPPOActor(BasePPOActor):
         # Pre-clip metrics temporarily unavailable.
         stats_pre = {"global": {}}
 
-        # --- 梯度裁剪 ---
+        # --- Gradient clipping ---
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         elif isinstance(self.actor_module, FSDPModule):
@@ -1728,7 +1728,7 @@ class DataParallelPPOActor(BasePPOActor):
         if isinstance(grad_norm, DTensor):
             grad_norm = grad_norm.full_tensor()
 
-        # --- 分析 2: Post-Clip ---
+        # --- Analysis 2: Post-Clip ---
         if dist.get_rank() == 0:
             print(f"[POST-CLIP] Grad Norm: {float(grad_norm):.6f} (Target: {self.config.grad_clip})")
 
@@ -1781,7 +1781,7 @@ class DataParallelPPOActor(BasePPOActor):
         # >>>>>>>>>>>>>>>>>>>>>>
 
         
-        # --- 执行更新 ---
+        # --- Execute optimizer step ---
         if self.scaler is not None:
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
@@ -1791,7 +1791,7 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 self.actor_optimizer.step()
 
-        # --- 分析 3: Post-Step ---
+        # --- Analysis 3: Post-Step ---
         stats_after = get_fsdp_comprehensive_analysis(self.actor_module, self.actor_optimizer)
 
         # Overwrite last_layer grad/mom/eff_lr with tracker's correct values
@@ -1837,11 +1837,11 @@ class DataParallelPPOActor(BasePPOActor):
         analysis_save_dir = os.path.join(os.environ.get("VERL_DEFAULT_LOCAL_DIR", "./checkpoints"), "analysis_data")
         log_fsdp_analysis(stats_after, current_step, save_dir=analysis_save_dir, stats_pre=stats_pre, token_freq=token_freq)
 
-        # 将 global 标量通过 metrics 管道回传给 trainer，最终写入 wandb
+        # Pass global scalars back to the trainer via metrics pipeline, ultimately written to wandb
         analysis_metrics = {}
         for k, v in stats_after["global"].items():
             analysis_metrics[f"analysis/{k}"] = v
-        # pre-clip 的原始梯度范数也一并记录
+        # Also log the pre-clip raw gradient norms
         for k, v in stats_pre["global"].items():
             analysis_metrics[f"analysis/pre_clip_{k}"] = v
 
