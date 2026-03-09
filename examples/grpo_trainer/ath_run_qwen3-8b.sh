@@ -82,7 +82,7 @@ if [[ -z "$TMUX" ]]; then
         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
          cd $PROJ_DIR && \
-         bash $SCRIPT_DIR/run_qwen3-8b.sh $ARGS; \
+         bash $SCRIPT_DIR/ath_run_qwen3-8b.sh $ARGS; \
          exec bash"
     echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
     exit 0
