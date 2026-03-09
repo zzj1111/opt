@@ -110,7 +110,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=1024 \
     data.max_prompt_length=512 \
-    data.max_response_length=1024 \
+    data.max_response_length=3072 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$MODEL \
