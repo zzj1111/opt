@@ -147,6 +147,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
     trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
+    +actor_rollout_ref.actor.freeze_largest=False \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
     trainer.total_epochs=15 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
