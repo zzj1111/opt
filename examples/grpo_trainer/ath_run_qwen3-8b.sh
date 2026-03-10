@@ -108,8 +108,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
-    data.train_batch_size=1024 \
-    data.max_prompt_length=512 \
+    data.train_batch_size=512 \
+    data.max_prompt_length=1024 \
     data.max_response_length=3072 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
@@ -147,7 +147,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
     trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
-    +actor_rollout_ref.actor.freeze_largest=False \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
-    trainer.total_epochs=15 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+    trainer.total_epochs=5 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
