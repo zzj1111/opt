@@ -10,7 +10,7 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 # Parse command-line arguments
 BETA1=0.9
 BETA2=0.999
-LR=3e-6
+LR=1e-6
 ROUND=""
 NOTE=""
 GPUS="0,1,2,3,4,5,6,7"
@@ -149,5 +149,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
-	+actor_rollout_ref.actor.freeze_largest=True \
     trainer.total_epochs=15 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
