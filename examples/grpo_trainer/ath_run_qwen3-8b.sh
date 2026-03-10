@@ -17,7 +17,7 @@ GPUS="0,1,2,3,4,5,6,7"
 MODEL="Qwen/Qwen3-1.7B"
 OPTIM="adamw"   # "adamw" or "sgd"
 MOMENTUM=0.9    # only used when OPTIM=sgd
-DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
+DATA_DIR="$PROJ_DIR/data/math"
 CKPT_ROOT="checkpoints"  # parent dir for experiment folders
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -142,7 +142,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
-    trainer.project_name='verl_grpo_numina_cot' \
+    trainer.project_name='verl_grpo_math' \
     trainer.experiment_name="$EXP_NAME" \
     trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
     trainer.n_gpus_per_node=$NGPUS \
