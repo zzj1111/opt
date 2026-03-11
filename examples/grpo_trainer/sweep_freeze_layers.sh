@@ -17,25 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_SCRIPT="$SCRIPT_DIR/ath_run_qwen3-8b.sh"
 
 LRS="1e-6,3e-6,5e-6"
-LAYER_SPECS=()
-PASSTHROUGH_ARGS=()
-SEEN_SEP=false
-
-for arg in "$@"; do
-    if [[ "$arg" == "--" ]]; then
-        SEEN_SEP=true
-        continue
-    fi
-    if $SEEN_SEP; then
-        PASSTHROUGH_ARGS+=("$arg")
-    elif [[ "$arg" == "--lrs" ]]; then
-        : # handled below via shift-style; use index parsing instead
-    else
-        LAYER_SPECS+=("$arg")
-    fi
-done
-
-# Re-parse to handle --lrs value properly
+SKIP=0
 LAYER_SPECS=()
 PASSTHROUGH_ARGS=()
 SEEN_SEP=false
@@ -51,8 +33,9 @@ while [[ $i -lt ${#args[@]} ]]; do
     if $SEEN_SEP; then
         PASSTHROUGH_ARGS+=("$arg")
     elif [[ "$arg" == "--lrs" ]]; then
-        i=$((i + 1))
-        LRS="${args[$i]}"
+        i=$((i + 1)); LRS="${args[$i]}"
+    elif [[ "$arg" == "--skip" ]]; then
+        i=$((i + 1)); SKIP="${args[$i]}"
     else
         LAYER_SPECS+=("$arg")
     fi
@@ -72,6 +55,12 @@ run_sweep() {
     local n=1
     for LAYERS in "${LAYER_SPECS[@]}"; do
         for LR in "${LR_LIST[@]}"; do
+            if [[ $n -le $SKIP ]]; then
+                echo "  [$n/$TOTAL] Skipping layer(s)=$LAYERS lr=$LR"
+                n=$((n + 1))
+                continue
+            fi
+
             echo "========================================"
             echo "  [$n/$TOTAL] layer(s)=$LAYERS  lr=$LR"
             echo "========================================"
