@@ -20,6 +20,8 @@ MOMENTUM=0.9    # only used when OPTIM=sgd
 DATA_DIR="$PROJ_DIR/data/math"
 CKPT_ROOT="checkpoints"  # parent dir for experiment folders
 FREEZE_LAYERS=1           # number of last layers to train (-1 = train all)
+TRAIN_LAYER_IDS=""        # explicit layer ids to train, e.g. "first", "middle", "last", "0,14,27"
+NO_TMUX=false             # skip tmux auto-launch (useful for sweep scripts)
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -34,6 +36,8 @@ while [[ $# -gt 0 ]]; do
         --momentum) MOMENTUM="$2"; shift 2 ;;
         --ckpt-root) CKPT_ROOT="$2"; shift 2 ;;
         --freeze-layers) FREEZE_LAYERS="$2"; shift 2 ;;
+        --train-layer-ids) TRAIN_LAYER_IDS="$2"; shift 2 ;;
+        --no-tmux) NO_TMUX=true; shift ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -54,11 +58,21 @@ else
     OPTIM_TAG="b1${BETA1}_b2${BETA2}"
 fi
 
+# Build layer tag for experiment name
+if [[ -n "$TRAIN_LAYER_IDS" ]]; then
+    LAYER_TAG="layer_${TRAIN_LAYER_IDS}"
+elif [[ "$FREEZE_LAYERS" -gt 0 ]]; then
+    LAYER_TAG="lastN${FREEZE_LAYERS}"
+else
+    LAYER_TAG=""
+fi
+
 # Auto-increment round: use mkdir as atomic lock to avoid conflicts
 if [[ -z "$ROUND" ]]; then
     ROUND=1
     while true; do
         EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_${OPTIM_TAG}_lr${LR}"
+        if [[ -n "$LAYER_TAG" ]]; then EXP_NAME="${EXP_NAME}_${LAYER_TAG}"; fi
         if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
         # mkdir fails if dir already exists, acting as an atomic claim
         if mkdir -p "$CKPT_ROOT" && mkdir "$CKPT_ROOT/$EXP_NAME" 2>/dev/null; then
@@ -68,12 +82,13 @@ if [[ -z "$ROUND" ]]; then
     done
 else
     EXP_NAME="${DATE}_r${ROUND}_${MODEL_SHORT}_${OPTIM_TAG}_lr${LR}"
+    if [[ -n "$LAYER_TAG" ]]; then EXP_NAME="${EXP_NAME}_${LAYER_TAG}"; fi
     if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
     mkdir -p "$CKPT_ROOT/$EXP_NAME"
 fi
 
 # If not inside tmux, launch a tmux session and re-run this script inside it
-if [[ -z "$TMUX" ]]; then
+if [[ -z "$TMUX" ]] && [[ "$NO_TMUX" == "false" ]]; then
     TMUX_SESSION="train_${EXP_NAME}"
     # Build the full command to re-run inside tmux
     ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --ckpt-root $CKPT_ROOT"
@@ -150,6 +165,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
     +actor_rollout_ref.actor.freeze_except_last_n_layers=$FREEZE_LAYERS \
+    $(if [[ -n "$TRAIN_LAYER_IDS" ]]; then echo "+actor_rollout_ref.actor.train_layer_ids=$TRAIN_LAYER_IDS"; fi) \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
     trainer.total_epochs=5 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
