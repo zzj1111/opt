@@ -13,7 +13,7 @@ BETA2=0.999
 LR=1e-6
 ROUND=""
 NOTE=""
-GPUS="0,1,2,3"
+GPUS="0,1,2,3,4,5,6,7"
 MODEL="Qwen/Qwen3-1.7B"
 OPTIM="adamw"   # "adamw" or "sgd"
 MOMENTUM=0.9    # only used when OPTIM=sgd
@@ -71,22 +71,22 @@ else
 fi
 
 # If not inside tmux, launch a tmux session and re-run this script inside it
-# if [[ -z "$TMUX" ]]; then
-#     TMUX_SESSION="train_${EXP_NAME}"
-#     # Build the full command to re-run inside tmux
-#     ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --ckpt-root $CKPT_ROOT"
-#     if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
-#     for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
+if [[ -z "$TMUX" ]]; then
+    TMUX_SESSION="train_${EXP_NAME}"
+    # Build the full command to re-run inside tmux
+    ARGS="--beta1 $BETA1 --beta2 $BETA2 --lr $LR --round $ROUND --gpus $GPUS --model $MODEL --optim $OPTIM --momentum $MOMENTUM --ckpt-root $CKPT_ROOT"
+    if [[ -n "$NOTE" ]]; then ARGS="$ARGS --note $NOTE"; fi
+    for arg in "${EXTRA_ARGS[@]}"; do ARGS="$ARGS $arg"; done
 
-#     tmux new-session -d -s "$TMUX_SESSION" \
-#         "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
-#          conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
-#          cd $PROJ_DIR && \
-#          bash $SCRIPT_DIR/ath_run_qwen3-8b.sh $ARGS; \
-#          exec bash"
-#     echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
-#     exit 0
-# fi
+    tmux new-session -d -s "$TMUX_SESSION" \
+        "source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate && \
+         conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda && \
+         cd $PROJ_DIR && \
+         bash $SCRIPT_DIR/ath_run_qwen3-8b.sh $ARGS; \
+         exec bash"
+    echo "Tmux session '$TMUX_SESSION' started. Attach with: tmux attach -t $TMUX_SESSION"
+    exit 0
+fi
 
 export CUDA_VISIBLE_DEVICES=$GPUS
 export WANDB_API_KEY="b8f38344ec7231ee89baa74ef7209dd5a43df6b2"
@@ -119,7 +119,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.checkpoint.save_contents='["hf_model"]' \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=128 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
