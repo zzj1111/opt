@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Sweep: sequentially run training experiments, each training specified layers.
-# Each positional argument defines one experiment's layer IDs (comma-separated for multi-layer).
+# Sweep: sequentially run training experiments over layer × lr combinations.
 #
 # Usage:
-#   bash sweep_freeze_layers.sh <layer_spec1> <layer_spec2> ... -- [extra args for ath_run_qwen3-8b.sh]
+#   bash sweep_freeze_layers.sh [--lrs <lr1,lr2,...>] <layer_spec1> <layer_spec2> ... -- [extra args]
 #
 # Examples:
-#   # Train layer 0, then layer 14, then layer 27
-#   bash sweep_freeze_layers.sh 0 14 27 -- --model Qwen/Qwen3-1.7B --lr 1e-6
+#   # Layer 0, 14, 27 each with 3 LRs (default)
+#   bash sweep_freeze_layers.sh 0 14 27 -- --model Qwen/Qwen3-1.7B
 #
-#   # Train layers 0,1 together, then layers 26,27 together
-#   bash sweep_freeze_layers.sh 0,1 26,27 -- --model Qwen/Qwen3-1.7B --lr 1e-6
+#   # Custom LR list
+#   bash sweep_freeze_layers.sh --lrs 1e-5,3e-5 0 14 27 -- --model Qwen/Qwen3-1.7B
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_SCRIPT="$SCRIPT_DIR/ath_run_qwen3-8b.sh"
 
-# Split args by "--": before is layer specs, after is passthrough args
+LRS="1e-6,3e-6,5e-6"
 LAYER_SPECS=()
 PASSTHROUGH_ARGS=()
 SEEN_SEP=false
+
 for arg in "$@"; do
     if [[ "$arg" == "--" ]]; then
         SEEN_SEP=true
@@ -28,39 +28,68 @@ for arg in "$@"; do
     fi
     if $SEEN_SEP; then
         PASSTHROUGH_ARGS+=("$arg")
+    elif [[ "$arg" == "--lrs" ]]; then
+        : # handled below via shift-style; use index parsing instead
     else
         LAYER_SPECS+=("$arg")
     fi
 done
 
+# Re-parse to handle --lrs value properly
+LAYER_SPECS=()
+PASSTHROUGH_ARGS=()
+SEEN_SEP=false
+i=0
+args=("$@")
+while [[ $i -lt ${#args[@]} ]]; do
+    arg="${args[$i]}"
+    if [[ "$arg" == "--" ]]; then
+        SEEN_SEP=true
+        i=$((i + 1))
+        continue
+    fi
+    if $SEEN_SEP; then
+        PASSTHROUGH_ARGS+=("$arg")
+    elif [[ "$arg" == "--lrs" ]]; then
+        i=$((i + 1))
+        LRS="${args[$i]}"
+    else
+        LAYER_SPECS+=("$arg")
+    fi
+    i=$((i + 1))
+done
+
 if [[ ${#LAYER_SPECS[@]} -eq 0 ]]; then
-    echo "Error: specify at least one layer spec."
-    echo "Usage: bash sweep_freeze_layers.sh <layers1> [<layers2> ...] -- [training args]"
+    echo "Usage: bash sweep_freeze_layers.sh [--lrs 1e-6,3e-6,5e-6] <layers1> [<layers2> ...] -- [training args]"
     echo "  e.g. bash sweep_freeze_layers.sh 0 14 27 -- --model Qwen/Qwen3-1.7B"
     exit 1
 fi
 
+IFS=',' read -ra LR_LIST <<< "$LRS"
+TOTAL=$(( ${#LAYER_SPECS[@]} * ${#LR_LIST[@]} ))
+
 run_sweep() {
-    local i=1
-    local total=${#LAYER_SPECS[@]}
+    local n=1
     for LAYERS in "${LAYER_SPECS[@]}"; do
-        echo "========================================"
-        echo "  [$i/$total] Training layer(s): $LAYERS"
-        echo "========================================"
+        for LR in "${LR_LIST[@]}"; do
+            echo "========================================"
+            echo "  [$n/$TOTAL] layer(s)=$LAYERS  lr=$LR"
+            echo "========================================"
 
-        bash "$TRAIN_SCRIPT" \
-            --train-layer-ids "$LAYERS" \
-            --freeze-layers 0 \
-            --no-tmux \
-            "${PASSTHROUGH_ARGS[@]}"
+            bash "$TRAIN_SCRIPT" \
+                --train-layer-ids "$LAYERS" \
+                --freeze-layers 0 \
+                --lr "$LR" \
+                --no-tmux \
+                "${PASSTHROUGH_ARGS[@]}"
 
-        echo ""
-        echo "  [$i/$total] Layer(s) $LAYERS finished."
-        echo ""
-        i=$((i + 1))
+            echo "  [$n/$TOTAL] layer(s)=$LAYERS lr=$LR finished."
+            echo ""
+            n=$((n + 1))
+        done
     done
 
-    echo "All $total sweep experiments completed."
+    echo "All $TOTAL sweep experiments completed."
 }
 
 # If not inside tmux, launch a tmux session for the whole sweep
