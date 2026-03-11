@@ -53,8 +53,8 @@ TOTAL=$(( ${#LAYER_SPECS[@]} * ${#LR_LIST[@]} ))
 
 run_sweep() {
     local n=1
-    for LAYERS in "${LAYER_SPECS[@]}"; do
-        for LR in "${LR_LIST[@]}"; do
+    for LR in "${LR_LIST[@]}"; do
+        for LAYERS in "${LAYER_SPECS[@]}"; do
             if [[ $n -le $SKIP ]]; then
                 echo "  [$n/$TOTAL] Skipping layer(s)=$LAYERS lr=$LR"
                 n=$((n + 1))
