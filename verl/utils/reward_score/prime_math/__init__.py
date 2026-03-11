@@ -292,12 +292,18 @@ def grade_answer(given_answer: str, ground_truth: str) -> bool:
                 # (no sympy.simplify)
                 is_correct = False
             else:
-                try:
-                    is_correct = are_equal_under_sympy(ground_truth_elem, given_elem)
-                except Exception as e:
-                    # if there's an error, we'll just say it's not correct
+                # Skip expensive sympy comparison when one side has unknown
+                # variables and the other is purely numeric — they can't be equal.
+                gt_has_vars = count_unknown_letters_in_expr(ground_truth_elem) > 0
+                gv_has_vars = count_unknown_letters_in_expr(given_elem) > 0
+                if gt_has_vars != gv_has_vars:
                     is_correct = False
-                    print(f"Error: {e} from are_equal_under_sympy, {ground_truth_elem}, {given_elem}")
+                else:
+                    try:
+                        is_correct = are_equal_under_sympy(ground_truth_elem, given_elem)
+                    except Exception as e:
+                        is_correct = False
+                        print(f"Error: {e} from are_equal_under_sympy, {ground_truth_elem}, {given_elem}")
             if not is_correct:
                 break
 

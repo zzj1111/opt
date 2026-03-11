@@ -575,8 +575,46 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         
         # <<<<<<<<<<<<<<<<<<<<<<<<<<
 
+        # Freeze all parameters except the last N transformer layers + lm_head + norm
+        freeze_n = OmegaConf.select(self.config, "actor.freeze_except_last_n_layers")
+        if freeze_n is not None and int(freeze_n) > 0:
+            freeze_n = int(freeze_n)
+            # Detect total number of transformer layers
+            model_inner = actor_module_fsdp
+            if hasattr(model_inner, "module"):
+                model_inner = model_inner.module
+            if hasattr(model_inner, "model") and hasattr(model_inner.model, "layers"):
+                total_layers = len(model_inner.model.layers)
+            else:
+                total_layers = None
 
-        
+            if total_layers is not None:
+                trainable_layer_ids = set(range(total_layers - freeze_n, total_layers))
+                # Build prefixes for trainable layers, e.g. "model.layers.27."
+                trainable_prefixes = tuple(
+                    [f"model.layers.{i}." for i in trainable_layer_ids]
+                    + ["model.norm", "lm_head"]
+                )
+
+                frozen_count = 0
+                trainable_count = 0
+                for name, p in actor_module_fsdp.named_parameters():
+                    if any(name.startswith(prefix) or name == prefix for prefix in trainable_prefixes):
+                        p.requires_grad = True
+                        trainable_count += 1
+                    else:
+                        p.requires_grad = False
+                        frozen_count += 1
+
+                if self.rank == 0:
+                    print(f"[freeze_except_last_n_layers={freeze_n}] "
+                          f"total_layers={total_layers}, "
+                          f"trainable_layers={sorted(trainable_layer_ids)}, "
+                          f"frozen_params={frozen_count}, trainable_params={trainable_count}")
+            else:
+                if self.rank == 0:
+                    print(f"[freeze_except_last_n_layers] WARNING: could not detect model layers, skipping freeze")
+
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 

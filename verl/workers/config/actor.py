@@ -283,7 +283,8 @@ class FSDPActorConfig(ActorConfig):
     use_rollout_log_probs: bool = False
 
     # >>>>>>>>>>>>>>>>>
-    freeze_largest: bool = False    
+    freeze_largest: bool = False
+    freeze_except_last_n_layers: int = -1  # -1 = disabled; N = only train last N transformer layers + lm_head + norm
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
