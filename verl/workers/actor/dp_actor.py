@@ -176,6 +176,8 @@ class LMHeadGradTracker:
     def _fwd_hook(self, module, input, output):
         if not (module.training and torch.is_grad_enabled()):
             return
+        if not output.requires_grad:
+            return
         saved_input = input[0].detach().clone()   # [*, H]
         tracker = self                            # prevent closure over self via __del__ cycle
 

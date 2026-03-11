@@ -612,10 +612,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             trainable_layer_ids = set(range(total_layers - freeze_n, total_layers))
 
         if trainable_layer_ids is not None and total_layers is not None:
-            # Build prefixes for trainable layers, e.g. "model.layers.27."
+            # Only train the specified transformer layers.
+            # lm_head, model.norm, model.embed_tokens are all frozen
+            # for clean controlled experiments.
             trainable_prefixes = tuple(
-                [f"model.layers.{i}." for i in trainable_layer_ids]
-                + ["model.norm", "lm_head"]
+                f"model.layers.{i}." for i in trainable_layer_ids
             )
 
             frozen_count = 0
