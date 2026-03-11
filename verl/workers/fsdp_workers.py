@@ -439,15 +439,52 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
-        # Layer freezing requires use_orig_params=True so FSDP preserves per-parameter
-        # requires_grad flags instead of merging everything into a FlatParameter.
-        if OmegaConf.select(self.config, "actor.train_layer_ids") is not None or (
-            OmegaConf.select(self.config, "actor.freeze_except_last_n_layers") is not None
-            and int(OmegaConf.select(self.config, "actor.freeze_except_last_n_layers")) > 0
-        ):
-            self.use_orig_params = True
+
+        # Freeze layers BEFORE FSDP init so each layer's FlatParameter is created
+        # with the correct requires_grad flag — no need for use_orig_params=True.
+        freeze_n_pre = OmegaConf.select(self.config, "actor.freeze_except_last_n_layers")
+        train_layer_ids_cfg_pre = OmegaConf.select(self.config, "actor.train_layer_ids")
+        if hasattr(actor_module, "model") and hasattr(actor_module.model, "layers"):
+            total_layers_pre = len(actor_module.model.layers)
+        else:
+            total_layers_pre = None
+
+        if total_layers_pre is not None and (train_layer_ids_cfg_pre is not None or
+                (freeze_n_pre is not None and int(freeze_n_pre) > 0)):
+            if train_layer_ids_cfg_pre is not None:
+                raw = str(train_layer_ids_cfg_pre).strip()
+                trainable_ids = set()
+                for token in raw.split(","):
+                    token = token.strip()
+                    if token == "first":
+                        trainable_ids.add(0)
+                    elif token == "middle":
+                        trainable_ids.add(total_layers_pre // 2)
+                    elif token == "last":
+                        trainable_ids.add(total_layers_pre - 1)
+                    else:
+                        trainable_ids.add(int(token))
+            else:
+                n = int(freeze_n_pre)
+                trainable_ids = set(range(total_layers_pre - n, total_layers_pre))
+
+            trainable_prefixes = tuple(f"model.layers.{i}." for i in trainable_ids)
+            frozen_count = trainable_count = 0
+            for name, p in actor_module.named_parameters():
+                if any(name.startswith(pfx) for pfx in trainable_prefixes):
+                    p.requires_grad_(True)
+                    trainable_count += 1
+                else:
+                    p.requires_grad_(False)
+                    frozen_count += 1
             if self.rank == 0:
-                print("[actor model] Layer freezing detected — forcing use_orig_params=True")
+                print(f"[layer_freeze] total_layers={total_layers_pre}, "
+                      f"trainable_layers={sorted(trainable_ids)}, "
+                      f"frozen={frozen_count}, trainable={trainable_count}")
+        elif total_layers_pre is None and (train_layer_ids_cfg_pre is not None or freeze_n_pre is not None):
+            if self.rank == 0:
+                print("[layer_freeze] WARNING: could not detect model layers, skipping freeze")
+
         if self.config.actor.get("freeze_vision_tower", False):
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is not None:
@@ -583,68 +620,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 
         
         # <<<<<<<<<<<<<<<<<<<<<<<<<<
-
-        # Freeze all parameters except specified transformer layers + lm_head + norm
-        # Priority: train_layer_ids > freeze_except_last_n_layers
-        freeze_n = OmegaConf.select(self.config, "actor.freeze_except_last_n_layers")
-        train_layer_ids_cfg = OmegaConf.select(self.config, "actor.train_layer_ids")
-
-        trainable_layer_ids = None
-
-        # Detect total number of transformer layers (needed by both modes)
-        model_inner = actor_module_fsdp
-        if hasattr(model_inner, "module"):
-            model_inner = model_inner.module
-        if hasattr(model_inner, "model") and hasattr(model_inner.model, "layers"):
-            total_layers = len(model_inner.model.layers)
-        else:
-            total_layers = None
-
-        if train_layer_ids_cfg is not None and total_layers is not None:
-            # train_layer_ids: comma-separated layer indices, e.g. "0,14,27"
-            # Also supports keywords: "first", "middle", "last"
-            raw = str(train_layer_ids_cfg).strip()
-            ids = set()
-            for token in raw.split(","):
-                token = token.strip()
-                if token == "first":
-                    ids.add(0)
-                elif token == "middle":
-                    ids.add(total_layers // 2)
-                elif token == "last":
-                    ids.add(total_layers - 1)
-                else:
-                    ids.add(int(token))
-            trainable_layer_ids = ids
-        elif freeze_n is not None and int(freeze_n) > 0 and total_layers is not None:
-            freeze_n = int(freeze_n)
-            trainable_layer_ids = set(range(total_layers - freeze_n, total_layers))
-
-        if trainable_layer_ids is not None and total_layers is not None:
-            # Only train the specified transformer layers.
-            # lm_head, model.norm, model.embed_tokens are all frozen
-            # for clean controlled experiments.
-            trainable_prefixes = tuple(
-                f"model.layers.{i}." for i in trainable_layer_ids
-            )
-
-            frozen_count = 0
-            trainable_count = 0
-            for name, p in actor_module_fsdp.named_parameters():
-                if any(name.startswith(prefix) or name == prefix for prefix in trainable_prefixes):
-                    p.requires_grad = True
-                    trainable_count += 1
-                else:
-                    p.requires_grad = False
-                    frozen_count += 1
-
-            if self.rank == 0:
-                print(f"[layer_freeze] total_layers={total_layers}, "
-                      f"trainable_layers={sorted(trainable_layer_ids)}, "
-                      f"frozen_params={frozen_count}, trainable_params={trainable_count}")
-        elif (freeze_n is not None or train_layer_ids_cfg is not None) and total_layers is None:
-            if self.rank == 0:
-                print(f"[layer_freeze] WARNING: could not detect model layers, skipping freeze")
 
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
