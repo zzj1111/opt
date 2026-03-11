@@ -19,6 +19,7 @@ OPTIM="adamw"   # "adamw" or "sgd"
 MOMENTUM=0.9    # only used when OPTIM=sgd
 DATA_DIR="$PROJ_DIR/data/math"
 CKPT_ROOT="checkpoints"  # parent dir for experiment folders
+FREEZE_LAYERS=1           # number of last layers to train (-1 = train all)
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --optim) OPTIM="$2"; shift 2 ;;
         --momentum) MOMENTUM="$2"; shift 2 ;;
         --ckpt-root) CKPT_ROOT="$2"; shift 2 ;;
+        --freeze-layers) FREEZE_LAYERS="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -147,7 +149,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="$CKPT_ROOT/$EXP_NAME" \
     trainer.n_gpus_per_node=$NGPUS \
     trainer.nnodes=1 \
-    +actor_rollout_ref.actor.freeze_except_last_n_layers=1 \
+    +actor_rollout_ref.actor.freeze_except_last_n_layers=$FREEZE_LAYERS \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
     trainer.total_epochs=5 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
