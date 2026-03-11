@@ -19,7 +19,7 @@ OPTIM="adamw"   # "adamw" or "sgd"
 MOMENTUM=0.9    # only used when OPTIM=sgd
 DATA_DIR="$PROJ_DIR/data/math"
 CKPT_ROOT="checkpoints"  # parent dir for experiment folders
-FREEZE_LAYERS=1           # number of last layers to train (-1 = train all)
+FREEZE_LAYERS=0           # number of last layers to train (0 = train all)
 TRAIN_LAYER_IDS=""        # explicit layer ids to train, e.g. "first", "middle", "last", "0,14,27"
 NO_TMUX=false             # skip tmux auto-launch (useful for sweep scripts)
 EXTRA_ARGS=()
