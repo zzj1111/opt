@@ -439,6 +439,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
 
         self.use_orig_params = fsdp_config.get("use_orig_params", False)
+        # Layer freezing requires use_orig_params=True so FSDP preserves per-parameter
+        # requires_grad flags instead of merging everything into a FlatParameter.
+        if OmegaConf.select(self.config, "actor.train_layer_ids") is not None or (
+            OmegaConf.select(self.config, "actor.freeze_except_last_n_layers") is not None
+            and int(OmegaConf.select(self.config, "actor.freeze_except_last_n_layers")) > 0
+        ):
+            self.use_orig_params = True
+            if self.rank == 0:
+                print("[actor model] Layer freezing detected — forcing use_orig_params=True")
         if self.config.actor.get("freeze_vision_tower", False):
             vision_tower = get_vl_model_vision_tower(actor_module)
             if vision_tower is not None:
