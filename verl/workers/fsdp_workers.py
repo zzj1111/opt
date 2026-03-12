@@ -454,6 +454,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if train_layer_ids_cfg_pre is not None:
                 raw = str(train_layer_ids_cfg_pre).strip()
                 trainable_ids = set()
+                extra_prefixes = []   # non-layer components, e.g. "embed", "norm", "lm_head"
                 for token in raw.split(","):
                     token = token.strip()
                     if token == "first":
@@ -462,13 +463,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         trainable_ids.add(total_layers_pre // 2)
                     elif token == "last":
                         trainable_ids.add(total_layers_pre - 1)
+                    elif token == "embed":
+                        extra_prefixes.append("model.embed_tokens")
+                    elif token == "norm":
+                        extra_prefixes.append("model.norm")
+                    elif token == "lm_head":
+                        extra_prefixes.append("lm_head")
                     else:
                         trainable_ids.add(int(token))
             else:
                 n = int(freeze_n_pre)
                 trainable_ids = set(range(total_layers_pre - n, total_layers_pre))
+                extra_prefixes = []
 
-            trainable_prefixes = tuple(f"model.layers.{i}." for i in trainable_ids)
+            trainable_prefixes = tuple(
+                [f"model.layers.{i}." for i in trainable_ids] + extra_prefixes
+            )
             frozen_count = trainable_count = 0
             for name, p in actor_module.named_parameters():
                 if any(name.startswith(pfx) for pfx in trainable_prefixes):
@@ -480,6 +490,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if self.rank == 0:
                 print(f"[layer_freeze] total_layers={total_layers_pre}, "
                       f"trainable_layers={sorted(trainable_ids)}, "
+                      f"extra={extra_prefixes}, "
                       f"frozen={frozen_count}, trainable={trainable_count}")
         elif total_layers_pre is None and (train_layer_ids_cfg_pre is not None or freeze_n_pre is not None):
             if self.rank == 0:
