@@ -55,7 +55,6 @@ fi
 
 IFS=',' read -ra LR_LIST <<< "$LRS"
 LAYER_TOTAL=$(( ${#LAYER_SPECS[@]} * ${#LR_LIST[@]} ))
-TOTAL=$(( LAYER_TOTAL + ( $FREEZE_LARGEST && echo 1 || echo 0 ) ))
 if $FREEZE_LARGEST; then TOTAL=$(( LAYER_TOTAL + 1 )); else TOTAL=$LAYER_TOTAL; fi
 
 run_sweep() {
