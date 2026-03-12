@@ -590,9 +590,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         if flag_value:
 
-            print("FREEZING LARGEST 95% weights !!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("FREEZING LARGEST 97% weights !!!!!!!!!!!!!!!!!!!!!!!!!")
 
-            freeze_ratio = 0.95        # fraction of largest weights to freeze
+            freeze_ratio = 0.97        # fraction of largest weights to freeze (~3% trainable, matching 1 layer)
             min_tensor_size = 10_000   # skip tiny tensors
 
             for name, p in actor_module_fsdp.named_parameters():

@@ -94,7 +94,7 @@ run_sweep() {
 
             bash "$TRAIN_SCRIPT" \
                 --no-tmux \
-                --note freezeL95 \
+                --note freezeL97 \
                 "${PASSTHROUGH_ARGS[@]}" \
                 '+actor_rollout_ref.actor.freeze_largest=True'
 
