@@ -632,6 +632,45 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         
         # <<<<<<<<<<<<<<<<<<<<<<<<<<
 
+        # >>>>>>>>>>>>>>>>>>>>>>
+        # Sparse training: only train K smallest-magnitude params within trainable layers
+        sparse_k = OmegaConf.select(self.config, "actor.sparse_train_k")
+        if sparse_k is not None and int(sparse_k) > 0:
+            sparse_k = int(sparse_k)
+            if self.rank == 0:
+                print(f"[sparse_train] Selecting {sparse_k} smallest params to train within trainable layers")
+
+            # Collect all trainable params (requires_grad=True) with their abs values
+            trainable_params = []
+            for name, p in actor_module_fsdp.named_parameters():
+                if p.requires_grad and p.ndim > 0 and p.numel() >= 10_000:
+                    trainable_params.append((name, p))
+
+            # Concatenate all trainable param abs values to find global top-K smallest
+            all_abs = torch.cat([p.detach().abs().view(-1) for _, p in trainable_params])
+            total_trainable = all_abs.numel()
+            actual_k = min(sparse_k, total_trainable)
+
+            # Find threshold: K smallest values
+            topk_vals, _ = torch.topk(all_abs, actual_k, largest=False)
+            threshold = topk_vals.max()
+
+            # Create masks: True = trainable (smallest), False = frozen
+            for name, p in trainable_params:
+                with torch.no_grad():
+                    mask = (p.detach().abs() <= threshold).to(p.device).to(torch.bool)
+                    p._freeze_mask = mask
+
+                if self.rank == 0:
+                    trainable_count = mask.sum().item()
+                    print(f"  {name}: {trainable_count}/{p.numel()} params trainable "
+                          f"({trainable_count/p.numel()*100:.2f}%)")
+
+            if self.rank == 0:
+                print(f"[sparse_train] total_trainable_pool={total_trainable}, "
+                      f"selected={actual_k}, threshold={threshold:.6e}")
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<
+
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 

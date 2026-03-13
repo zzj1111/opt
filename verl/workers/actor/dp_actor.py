@@ -1771,10 +1771,12 @@ class DataParallelPPOActor(BasePPOActor):
 
         # >>>>>>>>>>>>>>>>>>>>>>
         
-        flag_value = getattr(self.config, "freeze_largest", False)
- 
-        if flag_value:
-            # zero out frozen weights
+        freeze_largest = getattr(self.config, "freeze_largest", False)
+        sparse_k = getattr(self.config, "sparse_train_k", -1)
+        use_grad_mask = freeze_largest or (sparse_k is not None and int(sparse_k) > 0)
+
+        if use_grad_mask:
+            # zero out frozen weights (used by both freeze_largest and sparse_train_k)
             for group in self.actor_optimizer.param_groups:
                 for p in group["params"]:
                     if hasattr(p, "_freeze_mask") and p.grad is not None:

@@ -21,6 +21,7 @@ DATA_DIR="$PROJ_DIR/data/math"
 CKPT_ROOT="checkpoints"  # parent dir for experiment folders
 FREEZE_LAYERS=0           # number of last layers to train (0 = train all)
 TRAIN_LAYER_IDS=""        # explicit layer ids to train, e.g. "first", "middle", "last", "0,14,27"
+SPARSE_K=""               # only train K smallest-magnitude params within trainable layers
 NO_TMUX=false             # skip tmux auto-launch (useful for sweep scripts)
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --ckpt-root) CKPT_ROOT="$2"; shift 2 ;;
         --freeze-layers) FREEZE_LAYERS="$2"; shift 2 ;;
         --train-layer-ids) TRAIN_LAYER_IDS="$2"; shift 2 ;;
+        --sparse-k) SPARSE_K="$2"; shift 2 ;;
         --no-tmux) NO_TMUX=true; shift ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
@@ -65,6 +67,11 @@ elif [[ "$FREEZE_LAYERS" -gt 0 ]]; then
     LAYER_TAG="lastN${FREEZE_LAYERS}"
 else
     LAYER_TAG=""
+fi
+
+# Append sparse tag if specified
+if [[ -n "$SPARSE_K" ]]; then
+    LAYER_TAG="${LAYER_TAG}_sparse${SPARSE_K}"
 fi
 
 # Auto-increment round: use mkdir as atomic lock to avoid conflicts
@@ -166,6 +173,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     +actor_rollout_ref.actor.freeze_except_last_n_layers=$FREEZE_LAYERS \
     $(if [[ -n "$TRAIN_LAYER_IDS" ]]; then echo "+actor_rollout_ref.actor.train_layer_ids=$TRAIN_LAYER_IDS"; fi) \
+    $(if [[ -n "$SPARSE_K" ]]; then echo "+actor_rollout_ref.actor.sparse_train_k=$SPARSE_K"; fi) \
     trainer.save_freq=100 \
     trainer.test_freq=5 \
     trainer.total_epochs=5 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
