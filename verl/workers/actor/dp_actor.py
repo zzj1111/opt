@@ -1353,12 +1353,22 @@ class DataParallelPPOActor(BasePPOActor):
         actor_optimizer (torch.optim.Optimizer, optional): Actor optimizer. Defaults to None.
     """
 
-    def __init__(self, config: ActorConfig, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
-        """When optimizer is None, it is Reference Policy"""
+    def __init__(self, config: ActorConfig, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None,
+                 grad_masks: dict = None):
+        """When optimizer is None, it is Reference Policy.
+
+        Args:
+            grad_masks: Optional dict {param_name: bool_mask} for gradient zeroing.
+                        Used by freeze_largest and sparse_train_k.
+        """
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self._grad_masks = grad_masks or {}
         role = "Ref" if actor_optimizer is None else "Actor"
+
+        if self._grad_masks and torch.distributed.get_rank() == 0:
+            print(f"[{role}] Received {len(self._grad_masks)} gradient masks for sparse/freeze training")
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         if torch.distributed.get_rank() == 0:
@@ -1771,16 +1781,16 @@ class DataParallelPPOActor(BasePPOActor):
 
         # >>>>>>>>>>>>>>>>>>>>>>
         
-        freeze_largest = getattr(self.config, "freeze_largest", False)
-        sparse_k = getattr(self.config, "sparse_train_k", -1)
-        use_grad_mask = freeze_largest or (sparse_k is not None and int(sparse_k) > 0)
-
-        if use_grad_mask:
-            # zero out frozen weights (used by both freeze_largest and sparse_train_k)
-            for group in self.actor_optimizer.param_groups:
-                for p in group["params"]:
-                    if hasattr(p, "_freeze_mask") and p.grad is not None:
-                        p.grad *= p._freeze_mask
+        if self._grad_masks:
+            # Zero out gradients for frozen params (freeze_largest / sparse_train_k)
+            base = getattr(self.actor_module, "module", self.actor_module)
+            masked_count = 0
+            for name, p in base.named_parameters():
+                if name in self._grad_masks and p.grad is not None:
+                    p.grad *= self._grad_masks[name]
+                    masked_count += 1
+            if dist.get_rank() == 0 and current_step == 0:
+                print(f"[grad_mask] Applied {masked_count}/{len(self._grad_masks)} gradient masks")
 
         # >>>>>>>>>>>>>>>>>>>>>>
 

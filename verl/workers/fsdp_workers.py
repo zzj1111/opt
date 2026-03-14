@@ -597,6 +597,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # >>>>>>>>>>>>>>>>>>>>>>
 
+        # Gradient masks dict: {param_name: bool_mask}
+        # Stored on the worker and passed to dp_actor for gradient zeroing
+        self._grad_masks = {}
+
         flag_value = OmegaConf.select(self.config, "actor.freeze_largest") or False
 
         if flag_value:
@@ -622,14 +626,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     # True = trainable, False = frozen
                     mask = (p.detach().abs() < threshold).to(p.device).to(torch.bool)
 
-                # attach mask directly to the parameter
-                p._freeze_mask = mask
+                self._grad_masks[name] = mask
 
                 if self.rank == 0:
                     trainable_frac = mask.float().mean().item()
                     print(f"{name} trainable fraction: {trainable_frac:.3f}")
-                
-        
+
+
         # <<<<<<<<<<<<<<<<<<<<<<<<<<
 
         # >>>>>>>>>>>>>>>>>>>>>>
@@ -672,7 +675,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     mask = torch.zeros(p.numel(), dtype=torch.bool)
                     mask[perm[:k_i]] = True
                     mask = mask.view(p.shape).to(p.device)
-                    p._freeze_mask = mask
+                    self._grad_masks[name] = mask
 
                 if self.rank == 0:
                     print(f"  {name}: {k_i}/{p.numel()} params trainable "
@@ -959,7 +962,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_actor:
             actor_cfg = omega_conf_to_dataclass(self.config.actor)
             self.actor = DataParallelPPOActor(
-                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
+                config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer,
+                grad_masks=self._grad_masks if self._grad_masks else None,
             )
 
         if self._is_rollout:
