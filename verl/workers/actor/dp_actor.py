@@ -1789,8 +1789,9 @@ class DataParallelPPOActor(BasePPOActor):
                 if name in self._grad_masks and p.grad is not None:
                     p.grad *= self._grad_masks[name]
                     masked_count += 1
-            if dist.get_rank() == 0 and current_step == 0:
+            if not getattr(self, "_grad_mask_logged", False) and dist.get_rank() == 0:
                 print(f"[grad_mask] Applied {masked_count}/{len(self._grad_masks)} gradient masks")
+                self._grad_mask_logged = True
 
         # >>>>>>>>>>>>>>>>>>>>>>
 
