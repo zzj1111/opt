@@ -103,6 +103,11 @@ run_sweep() {
     fi
 
     echo "All $TOTAL sweep experiments completed."
+    echo "========================================"
+    echo "  Starting dummy GPU hold job..."
+    echo "========================================"
+    DUMMY_RUN_NAME="dummy_$(hostname)_$(date +%m%d_%H%M)" \
+        python "$SCRIPT_DIR/dummy_gpu_hold.py"
 }
 
 # If not inside tmux, launch a tmux session for the whole sweep

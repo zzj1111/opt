@@ -73,6 +73,11 @@ run_sweep() {
     done
 
     echo "All $TOTAL sparse_k×lr sweep experiments completed."
+    echo "========================================"
+    echo "  Starting dummy GPU hold job..."
+    echo "========================================"
+    DUMMY_RUN_NAME="dummy_$(hostname)_$(date +%m%d_%H%M)" \
+        python "$SCRIPT_DIR/dummy_gpu_hold.py"
 }
 
 # If not inside tmux, launch a tmux session
