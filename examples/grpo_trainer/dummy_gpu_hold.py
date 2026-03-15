@@ -9,10 +9,13 @@ def main():
     project = os.environ.get("WANDB_PROJECT", "verl_grpo_math")
     run_name = os.environ.get("DUMMY_RUN_NAME", "dummy_gpu_hold")
 
+    os.environ.setdefault("WANDB_API_KEY", "b8f38344ec7231ee89baa74ef7209dd5a43df6b2")
+    os.environ.setdefault("WANDB_ENTITY", "mhong-university-of-minnesota")
+
     # Try to use wandb, but don't crash if unavailable
     try:
         import wandb
-        wandb.init(project=project, name=run_name, tags=["dummy"])
+        wandb.init(project=project, entity=os.environ["WANDB_ENTITY"], name=run_name, tags=["dummy"])
         use_wandb = True
     except Exception:
         use_wandb = False
