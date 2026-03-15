@@ -12,7 +12,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # Defaults
-LR=1e-5
+LR=5e-6
 ROUND=""
 NOTE=""
 GPUS="0,1,2,3,4,5,6,7"
@@ -95,9 +95,9 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/test.parquet \
-    data.train_batch_size=256 \
-    data.max_prompt_length=512 \
-    data.max_response_length=1024 \
+    data.train_batch_size=512\
+    data.max_prompt_length=1024 \
+    data.max_response_length=3072 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$MODEL \
@@ -105,8 +105,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.betas=[0.9,0.999] \
     actor_rollout_ref.actor.checkpoint.save_contents='["hf_model"]' \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
