@@ -64,6 +64,10 @@ def default_compute_score(
         from . import prime_math
 
         res = prime_math.compute_score(solution_str, ground_truth)
+    elif data_source == "mbpp":
+        from . import mbpp
+
+        res = mbpp.compute_score(solution_str, ground_truth)
     elif data_source in ["codecontests", "apps", "codeforces", "taco"]:
         # Use the passed sandbox_fusion_url if available
         if sandbox_fusion_url:
