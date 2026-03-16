@@ -52,9 +52,20 @@ def compute_score(completion: str, ground_truth, continuous=False):
 
     try:
         if isinstance(ground_truth, str):
-            test_list = json.loads(ground_truth)
+            parsed = json.loads(ground_truth)
         else:
-            test_list = ground_truth
+            parsed = ground_truth
+
+        # Support both formats: direct list or dict with "test_list" key
+        if isinstance(parsed, dict):
+            test_list = parsed.get("test_list", [])
+            setup_code = parsed.get("test_setup_code", "")
+            if setup_code:
+                code = setup_code + "\n" + code
+        elif isinstance(parsed, list):
+            test_list = parsed
+        else:
+            test_list = []
 
         if not continuous:
             success = _run_tests(code, test_list, timeout=10)
