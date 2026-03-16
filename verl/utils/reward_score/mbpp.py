@@ -1,31 +1,38 @@
 """MBPP reward: execute generated code against assert-based test cases."""
 
 import json
-import multiprocessing
+import subprocess
+import tempfile
+import os
 import traceback
 
 
 def _run_tests(code: str, test_list: list[str], timeout: int = 10) -> bool:
-    """Execute code + assert statements in a subprocess with timeout."""
-    # Combine generated code with all assert test cases
+    """Execute code + assert statements via subprocess with timeout."""
     full_code = code + "\n\n" + "\n".join(test_list)
 
-    def _exec_fn(code_str):
-        try:
-            exec(code_str, {})
-        except Exception:
-            raise
+    # Write code to a temp file and execute via subprocess
+    # This works reliably inside Ray workers (unlike multiprocessing.Process)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(full_code)
+        tmp_path = f.name
 
-    proc = multiprocessing.Process(target=_exec_fn, args=(full_code,))
-    proc.start()
-    proc.join(timeout=timeout)
-
-    if proc.is_alive():
-        proc.kill()
-        proc.join()
+    try:
+        result = subprocess.run(
+            ['python3', tmp_path],
+            capture_output=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
         return False
-
-    return proc.exitcode == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def compute_score(completion: str, ground_truth, continuous=False):
@@ -33,8 +40,7 @@ def compute_score(completion: str, ground_truth, continuous=False):
 
     Args:
         completion: Model-generated response (may contain markdown code blocks).
-        ground_truth: JSON string of list of assert statements, e.g.
-                      '["assert func(1)==2", "assert func(3)==4"]'
+        ground_truth: JSON string or dict/list of test cases.
         continuous: If True, return per-test-case scores.
 
     Returns:
