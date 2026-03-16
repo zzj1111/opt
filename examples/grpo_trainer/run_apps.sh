@@ -48,8 +48,8 @@ if [[ -n "$TRAIN_LAYER_IDS" ]]; then
     LAYER_TAG="layer_$(echo "$TRAIN_LAYER_IDS" | tr ',' '_')"
 fi
 
-EXP_NAME="apps_${DATE}_${MODEL_SHORT}_lr${LR}"
-if [[ -n "$ROUND" ]]; then EXP_NAME="apps_${DATE}_r${ROUND}_${MODEL_SHORT}_lr${LR}"; fi
+EXP_NAME="apps_intro_${DATE}_${MODEL_SHORT}_lr${LR}"
+if [[ -n "$ROUND" ]]; then EXP_NAME="apps_intro_${DATE}_r${ROUND}_${MODEL_SHORT}_lr${LR}"; fi
 if [[ -n "$LAYER_TAG" ]]; then EXP_NAME="${EXP_NAME}_${LAYER_TAG}"; fi
 if [[ -n "$NOTE" ]]; then EXP_NAME="${EXP_NAME}_${NOTE}"; fi
 mkdir -p "$CKPT_ROOT/$EXP_NAME"
@@ -92,8 +92,8 @@ echo "Logging to: $LOG_FILE"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$DATA_DIR/train.parquet \
-    data.val_files=$DATA_DIR/test.parquet \
+    data.train_files=$DATA_DIR/train_intro.parquet \
+    data.val_files=$DATA_DIR/test_intro.parquet \
     data.train_batch_size=512 \
     data.max_prompt_length=1024 \
     data.max_response_length=3072 \
