@@ -1,78 +1,152 @@
-"""Dummy GPU job: allocate all GPU memory and run matmuls to keep the node alive.
-Logs heartbeat to wandb so it shows up as a run named "dummy".
+"""Dummy GPU job: hold GPU memory and run light workloads to keep the node alive.
+Logs heartbeat to wandb. Auto-recovers from CUDA errors.
 """
 import os
+import signal
+import sys
 import time
+
 import torch
+
 
 def main():
     project = os.environ.get("WANDB_PROJECT", "verl_grpo_math")
     run_name = os.environ.get("DUMMY_RUN_NAME", "dummy_gpu_hold")
+    # How much free memory to allocate (lower = safer)
+    alloc_ratio = float(os.environ.get("DUMMY_ALLOC_RATIO", "0.70"))
 
     os.environ.setdefault("WANDB_API_KEY", "b8f38344ec7231ee89baa74ef7209dd5a43df6b2")
     os.environ.setdefault("WANDB_ENTITY", "mhong-university-of-minnesota")
 
-    # Try to use wandb, but don't crash if unavailable
+    # Graceful shutdown on SIGTERM (SLURM preemption sends this)
+    shutdown = False
+
+    def _handle_signal(signum, frame):
+        nonlocal shutdown
+        print(f"\n[dummy] Received signal {signum}, shutting down gracefully...")
+        shutdown = True
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    # wandb init
+    use_wandb = False
     try:
         import wandb
-        wandb.init(project=project, entity=os.environ["WANDB_ENTITY"], name=run_name, tags=["dummy"])
+        wandb.init(project=project, entity=os.environ["WANDB_ENTITY"],
+                   name=run_name, tags=["dummy"])
         use_wandb = True
-    except Exception:
-        use_wandb = False
-        print("[dummy] wandb unavailable, running without logging")
+    except Exception as e:
+        print(f"[dummy] wandb unavailable ({e}), running without logging")
 
     num_gpus = torch.cuda.device_count()
-    print(f"[dummy] Detected {num_gpus} GPUs, allocating memory...")
+    if num_gpus == 0:
+        print("[dummy] No GPUs found, sleeping forever...")
+        while not shutdown:
+            time.sleep(60)
+        return
 
-    # Allocate ~90% of each GPU's memory with large tensors
-    tensors = []
-    for i in range(num_gpus):
-        dev = torch.device(f"cuda:{i}")
-        free, total = torch.cuda.mem_get_info(dev)
-        alloc_bytes = int(free * 0.90)
-        n_floats = alloc_bytes // 4  # float32 = 4 bytes
-        t = torch.randn(n_floats, device=dev, dtype=torch.float32)
-        tensors.append(t)
-        alloc_gb = alloc_bytes / (1024**3)
-        total_gb = total / (1024**3)
-        print(f"  GPU {i}: allocated {alloc_gb:.1f} GB / {total_gb:.1f} GB")
+    def allocate_memory():
+        """Allocate GPU memory. Returns (holders, matmul_pairs)."""
+        holders = []
+        mat_pairs = []
+        for i in range(num_gpus):
+            dev = torch.device(f"cuda:{i}")
+            try:
+                free, total = torch.cuda.mem_get_info(dev)
+                alloc_bytes = int(free * alloc_ratio)
+                n_floats = alloc_bytes // 4
+                t = torch.empty(n_floats, device=dev, dtype=torch.float32)
+                # Fill with small values to actually commit the memory
+                t.fill_(0.001)
+                holders.append(t)
 
-    # Prepare matmul workloads (one per GPU)
-    dim = 4096
-    mats = []
-    for i in range(num_gpus):
-        dev = torch.device(f"cuda:{i}")
-        a = torch.randn(dim, dim, device=dev, dtype=torch.float32)
-        b = torch.randn(dim, dim, device=dev, dtype=torch.float32)
-        mats.append((a, b))
+                # Small matmul workload (512x512 uses ~1MB, very safe)
+                dim = 512
+                a = torch.randn(dim, dim, device=dev, dtype=torch.float32)
+                b = torch.randn(dim, dim, device=dev, dtype=torch.float32)
+                mat_pairs.append((a, b))
 
-    print(f"[dummy] Running matmuls on {num_gpus} GPUs. Ctrl+C to stop.")
+                alloc_gb = alloc_bytes / (1024**3)
+                total_gb = total / (1024**3)
+                print(f"  GPU {i}: allocated {alloc_gb:.1f} GB / {total_gb:.1f} GB "
+                      f"({alloc_ratio*100:.0f}%)")
+            except RuntimeError as e:
+                print(f"  GPU {i}: allocation failed ({e}), skipping")
+        return holders, mat_pairs
+
+    print(f"[dummy] Detected {num_gpus} GPUs, allocating {alloc_ratio*100:.0f}% memory...")
+    holders, mat_pairs = allocate_memory()
+
+    print(f"[dummy] Running. Ctrl+C or SIGTERM to stop.")
     step = 0
-    try:
-        while True:
-            for i, (a, b) in enumerate(mats):
-                torch.mm(a, b)
-            torch.cuda.synchronize()
+    consecutive_errors = 0
+    max_consecutive_errors = 5
 
+    while not shutdown:
+        try:
+            # Light matmul on each GPU
+            for a, b in mat_pairs:
+                torch.mm(a, b)
+            # Don't synchronize every step — reduces overhead
+            if step % 10 == 0:
+                torch.cuda.synchronize()
+
+            consecutive_errors = 0  # reset on success
+
+            # Heartbeat every 60 steps (~60s)
             if step % 60 == 0:
                 log = {"step": step, "alive": 1}
                 for i in range(num_gpus):
                     used = torch.cuda.memory_allocated(i) / (1024**3)
-                    log[f"gpu{i}_mem_gb"] = used
+                    log[f"gpu{i}_mem_gb"] = round(used, 2)
                 if use_wandb:
-                    wandb.log(log, step=step)
-                print(f"[dummy] step={step} heartbeat logged")
+                    try:
+                        wandb.log(log, step=step)
+                    except Exception:
+                        pass  # don't crash on wandb errors
+                print(f"[dummy] step={step} | " +
+                      " | ".join(f"GPU{i}: {log.get(f'gpu{i}_mem_gb', '?')}GB"
+                                 for i in range(num_gpus)))
 
             step += 1
             time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n[dummy] Interrupted, cleaning up...")
-    finally:
-        if use_wandb:
-            wandb.finish()
-        del tensors, mats
+
+        except RuntimeError as e:
+            consecutive_errors += 1
+            err_msg = str(e)
+            print(f"[dummy] CUDA error ({consecutive_errors}/{max_consecutive_errors}): "
+                  f"{err_msg[:200]}")
+
+            if consecutive_errors >= max_consecutive_errors:
+                print("[dummy] Too many consecutive errors, exiting.")
+                break
+
+            # Try to recover: clear cache and reallocate
+            try:
+                del holders, mat_pairs
+                torch.cuda.empty_cache()
+                time.sleep(5)
+                print("[dummy] Attempting reallocation...")
+                holders, mat_pairs = allocate_memory()
+                print("[dummy] Recovery successful.")
+            except Exception as e2:
+                print(f"[dummy] Recovery failed: {e2}")
+
+    # Cleanup
+    print("[dummy] Cleaning up...")
+    try:
+        del holders, mat_pairs
         torch.cuda.empty_cache()
-        print("[dummy] Done.")
+    except Exception:
+        pass
+    if use_wandb:
+        try:
+            wandb.finish()
+        except Exception:
+            pass
+    print("[dummy] Done.")
+
 
 if __name__ == "__main__":
     main()
