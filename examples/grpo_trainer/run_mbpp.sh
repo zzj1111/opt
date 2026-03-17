@@ -41,7 +41,7 @@ done
 
 MODEL_SHORT=$(basename "$MODEL")
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
-DATE=$(date +%m%d)
+DATE=$(date +%m%d_%H%M)
 
 # Layer tag for experiment name
 LAYER_TAG=""
