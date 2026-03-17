@@ -1,0 +1,12 @@
+# BBH runs as a group of 27 subtasks; lm-eval task name is "bbh"
+task: bbh
+num_fewshot: 3
+metric: acc_norm,none
+description: "BIG-Bench Hard (3-shot CoT): 23 diverse reasoning tasks"
+gen_kwargs:
+  temperature: 0.6
+  top_p: 0.95
+  max_gen_toks: 2048
+# Subsample to ~2K across subtasks; indices saved in results/indices/bbh.json
+subsample: 2000
+subsample_indices_file: results/indices/bbh.json

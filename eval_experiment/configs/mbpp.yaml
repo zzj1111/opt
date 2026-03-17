@@ -1,0 +1,9 @@
+task: mbpp
+num_fewshot: 3
+metric: pass@1,none
+description: "MBPP: execution-based code generation (pass@1)"
+gen_kwargs:
+  temperature: 0.6
+  top_p: 0.95
+  max_gen_toks: 2048
+limit: 500

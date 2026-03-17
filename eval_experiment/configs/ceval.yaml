@@ -1,0 +1,8 @@
+task: ceval-valid
+num_fewshot: 5
+metric: acc,none
+description: "C-Eval: Chinese knowledge benchmark"
+gen_kwargs:
+  temperature: 0.6
+  top_p: 0.95
+  max_gen_toks: 1024

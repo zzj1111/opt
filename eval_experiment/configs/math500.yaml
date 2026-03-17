@@ -1,0 +1,10 @@
+task: minerva_math
+num_fewshot: 0
+metric: exact_match,none
+description: "MATH-500: on-target math benchmark (RLVR training domain)"
+gen_kwargs:
+  temperature: 0.6
+  top_p: 0.95
+  max_gen_toks: 4096
+# Use all 500 test problems (no subsampling)
+limit: 500

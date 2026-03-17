@@ -1,0 +1,11 @@
+task: mmlu_pro
+num_fewshot: 5
+metric: acc,none
+description: "MMLU-Pro (5-shot CoT): factual knowledge + shallow reasoning"
+gen_kwargs:
+  temperature: 0.6
+  top_p: 0.95
+  max_gen_toks: 2048
+# Subsample to ~2K for cost control; indices saved in results/indices/mmlu_pro.json
+subsample: 2000
+subsample_indices_file: results/indices/mmlu_pro.json
