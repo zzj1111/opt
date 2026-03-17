@@ -1,16 +1,21 @@
 #!/bin/bash
 # Main evaluation script: iterate over all checkpoints × all benchmarks.
 #
-# Usage:
-#   cd eval_experiment/
-#   bash scripts/run_eval.sh                          # run everything
-#   bash scripts/run_eval.sh --benchmarks math500,gsm8k   # specific benchmarks
-#   bash scripts/run_eval.sh --checkpoints layer_0,layer_1  # specific checkpoints
-#   bash scripts/run_eval.sh --gpu 0 --batch-size 32
-#   bash scripts/run_eval.sh --parallel 2             # use 2 GPUs in parallel
+# Server (multi-GPU):
+#   bash scripts/run_eval.sh --parallel 4
+#   bash scripts/run_eval.sh --benchmarks math500,gsm8k --checkpoints layer_0,layer_1
+#
+# Local Mac (MPS):
+#   bash scripts/run_eval.sh --device mps --batch-size 4 --lite
+#
+# Local CPU:
+#   bash scripts/run_eval.sh --device cpu --batch-size 1 --lite --benchmarks gsm8k
+#
+# Limited VRAM (4-bit):
+#   bash scripts/run_eval.sh --load-in-4bit --batch-size 8
 #
 # Prerequisites:
-#   pip install lm-eval[math,ifeval,sentencepiece] pyyaml
+#   pip install "lm-eval[math,ifeval,sentencepiece]>=0.4.0" pyyaml
 #
 set -euo pipefail
 
@@ -18,13 +23,17 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 EVAL_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 
 # ── Defaults ────────────────────────────────────────────────────────────────
+DEVICE="auto"       # auto | cuda | mps | cpu
 GPU=0
-BATCH_SIZE=16
-PARALLEL=1         # number of parallel GPU workers
+BATCH_SIZE="auto"
+PARALLEL=1
 REGISTRY="$EVAL_DIR/checkpoints/registry.yaml"
 CONFIG_DIR="$EVAL_DIR/configs"
 OUTPUT_DIR="$EVAL_DIR/results/raw"
 FORCE=false
+LITE=false
+LOAD_IN_4BIT=false
+LOAD_IN_8BIT=false
 
 ALL_BENCHMARKS="math500 gsm8k mbpp ifeval mmlu_pro bbh mgsm ceval"
 BENCHMARKS=""
@@ -33,12 +42,16 @@ CHECKPOINTS=""
 # ── Arg parsing ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --device)       DEVICE="$2";      shift 2 ;;
         --gpu)          GPU="$2";         shift 2 ;;
         --batch-size)   BATCH_SIZE="$2";  shift 2 ;;
         --parallel)     PARALLEL="$2";    shift 2 ;;
         --registry)     REGISTRY="$2";    shift 2 ;;
         --benchmarks)   BENCHMARKS="$2";  shift 2 ;;
         --checkpoints)  CHECKPOINTS="$2"; shift 2 ;;
+        --load-in-4bit) LOAD_IN_4BIT=true; shift  ;;
+        --load-in-8bit) LOAD_IN_8BIT=true; shift  ;;
+        --lite)         LITE=true;        shift   ;;
         --force)        FORCE=true;       shift   ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -75,9 +88,14 @@ if [[ -n "$CHECKPOINTS" ]]; then
     CKPT_LABELS=$(echo "$CHECKPOINTS" | tr ',' ' ')
 fi
 
+LITE_TAG=""
+if $LITE; then LITE_TAG=" [LITE]"; fi
+
 echo "======================================================"
+echo "Device:      $DEVICE${LITE_TAG}"
 echo "Checkpoints: $CKPT_LABELS"
 echo "Benchmarks:  $BENCHMARKS"
+echo "Batch size:  $BATCH_SIZE"
 echo "Output:      $OUTPUT_DIR"
 echo "======================================================"
 
@@ -99,54 +117,49 @@ done
 echo "Total jobs: ${#JOBS[@]}"
 
 # ── Run jobs (sequential or parallel) ───────────────────────────────────────
-FORCE_FLAG=""
-if $FORCE; then FORCE_FLAG="--force"; fi
+EXTRA_FLAGS=""
+if $FORCE;        then EXTRA_FLAGS="$EXTRA_FLAGS --force"; fi
+if $LITE;         then EXTRA_FLAGS="$EXTRA_FLAGS --lite"; fi
+if $LOAD_IN_4BIT; then EXTRA_FLAGS="$EXTRA_FLAGS --load-in-4bit"; fi
+if $LOAD_IN_8BIT; then EXTRA_FLAGS="$EXTRA_FLAGS --load-in-8bit"; fi
+
+run_job() {
+    local LABEL="$1" CKPT_PATH="$2" BENCH="$3" GPU_ID="$4"
+    python3 "$SCRIPT_DIR/run_single.py" \
+        --ckpt-label "$LABEL" \
+        --ckpt-path  "$CKPT_PATH" \
+        --benchmark  "$BENCH" \
+        --config-dir "$CONFIG_DIR" \
+        --output-dir "$OUTPUT_DIR" \
+        --device     "$DEVICE" \
+        --gpu        "$GPU_ID" \
+        --batch-size "$BATCH_SIZE" \
+        $EXTRA_FLAGS
+}
 
 if [[ "$PARALLEL" -le 1 ]]; then
     for JOB in "${JOBS[@]}"; do
-        IFS='|' read -r LABEL PATH BENCH <<< "$JOB"
-        python3 "$SCRIPT_DIR/run_single.py" \
-            --ckpt-label "$LABEL" \
-            --ckpt-path  "$PATH" \
-            --benchmark  "$BENCH" \
-            --config-dir "$CONFIG_DIR" \
-            --output-dir "$OUTPUT_DIR" \
-            --gpu        "$GPU" \
-            --batch-size "$BATCH_SIZE" \
-            $FORCE_FLAG
+        IFS='|' read -r LABEL CKPT_PATH BENCH <<< "$JOB"
+        run_job "$LABEL" "$CKPT_PATH" "$BENCH" "$GPU"
     done
 else
-    # Parallel mode: distribute jobs across GPUs 0..(PARALLEL-1)
+    # Parallel mode: distribute across GPUs 0..(PARALLEL-1)
     declare -A PIDS
     JOB_IDX=0
     for JOB in "${JOBS[@]}"; do
-        IFS='|' read -r LABEL PATH BENCH <<< "$JOB"
+        IFS='|' read -r LABEL CKPT_PATH BENCH <<< "$JOB"
         GPU_ID=$(( JOB_IDX % PARALLEL ))
-
-        python3 "$SCRIPT_DIR/run_single.py" \
-            --ckpt-label "$LABEL" \
-            --ckpt-path  "$PATH" \
-            --benchmark  "$BENCH" \
-            --config-dir "$CONFIG_DIR" \
-            --output-dir "$OUTPUT_DIR" \
-            --gpu        "$GPU_ID" \
-            --batch-size "$BATCH_SIZE" \
-            $FORCE_FLAG &
-
+        run_job "$LABEL" "$CKPT_PATH" "$BENCH" "$GPU_ID" &
         PIDS[$!]="$LABEL×$BENCH"
         JOB_IDX=$(( JOB_IDX + 1 ))
 
-        # Wait when we hit PARALLEL concurrent jobs
         if (( JOB_IDX % PARALLEL == 0 )); then
             for PID in "${!PIDS[@]}"; do
-                wait "$PID" && echo "[done] ${PIDS[$PID]}" \
-                            || echo "[FAIL] ${PIDS[$PID]}"
+                wait "$PID" && echo "[done] ${PIDS[$PID]}" || echo "[FAIL] ${PIDS[$PID]}"
             done
-            unset PIDS
-            declare -A PIDS
+            unset PIDS; declare -A PIDS
         fi
     done
-    # Wait for remaining jobs
     for PID in "${!PIDS[@]}"; do
         wait "$PID" && echo "[done] ${PIDS[$PID]}" || echo "[FAIL] ${PIDS[$PID]}"
     done
