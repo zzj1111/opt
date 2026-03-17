@@ -137,4 +137,4 @@ python3 -m verl.trainer.main_ppo \
     $FREEZE_ARGS \
     trainer.save_freq=50 \
     trainer.test_freq=5 \
-    trainer.total_epochs=5 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+    trainer.total_epochs=15 "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
