@@ -5,6 +5,8 @@ description: "MMLU-Pro (5-shot CoT): factual knowledge + shallow reasoning"
 gen_kwargs:
   temperature: 0.6
   top_p: 0.95
+  do_sample: true
+  top_k: 20
   max_gen_toks: 2048
 # Subsample to ~2K for cost control; indices saved in results/indices/mmlu_pro.json
 subsample: 2000

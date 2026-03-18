@@ -5,4 +5,6 @@ description: "C-Eval: Chinese knowledge benchmark"
 gen_kwargs:
   temperature: 0.6
   top_p: 0.95
+  do_sample: true
+  top_k: 20
   max_gen_toks: 1024
