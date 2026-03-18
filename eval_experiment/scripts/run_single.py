@@ -223,7 +223,13 @@ def run_lm_eval(
     env = os.environ.copy()
     # Only set CUDA_VISIBLE_DEVICES on CUDA; leave unset for cpu/mps
     if device == "cuda":
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        # Respect parent's CUDA_VISIBLE_DEVICES: pick the gpu-th device from it
+        parent_devs = env.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        parent_devs = [d.strip() for d in parent_devs if d.strip()]
+        if parent_devs and gpu < len(parent_devs):
+            env["CUDA_VISIBLE_DEVICES"] = parent_devs[gpu]
+        else:
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
     lite_tag = " [LITE]" if lite else ""
     print(f"\n{'='*60}")
