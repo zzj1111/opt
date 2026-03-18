@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source /code/hongpaul-sandbox/cuda/miniconda3/bin/activate
+conda activate /code/hongpaul-sandbox/cuda/miniconda3/envs/cuda
+
 cd eval_experiment/
 
 HF_TOKEN=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 bash scripts/batch_eval.sh \
