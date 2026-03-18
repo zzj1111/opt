@@ -8,3 +8,5 @@ gen_kwargs:
   do_sample: true
   top_k: 20
   max_gen_toks: 1024
+# 52 subtasks × 25 per subtask ≈ 1,300 total samples
+limit: 25
