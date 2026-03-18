@@ -34,6 +34,7 @@ FORCE=false
 LITE=false
 LOAD_IN_4BIT=false
 LOAD_IN_8BIT=false
+MAX_GEN_TOKS=""
 
 ALL_BENCHMARKS="math500 gsm8k mbpp ifeval mmlu_pro bbh mgsm ceval"
 BENCHMARKS=""
@@ -42,17 +43,18 @@ CHECKPOINTS=""
 # ── Arg parsing ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --device)       DEVICE="$2";      shift 2 ;;
-        --gpu)          GPU="$2";         shift 2 ;;
-        --batch-size)   BATCH_SIZE="$2";  shift 2 ;;
-        --parallel)     PARALLEL="$2";    shift 2 ;;
-        --registry)     REGISTRY="$2";    shift 2 ;;
-        --benchmarks)   BENCHMARKS="$2";  shift 2 ;;
-        --checkpoints)  CHECKPOINTS="$2"; shift 2 ;;
-        --load-in-4bit) LOAD_IN_4BIT=true; shift  ;;
-        --load-in-8bit) LOAD_IN_8BIT=true; shift  ;;
-        --lite)         LITE=true;        shift   ;;
-        --force)        FORCE=true;       shift   ;;
+        --device)         DEVICE="$2";      shift 2 ;;
+        --gpu)            GPU="$2";         shift 2 ;;
+        --batch-size)     BATCH_SIZE="$2";  shift 2 ;;
+        --parallel)       PARALLEL="$2";    shift 2 ;;
+        --registry)       REGISTRY="$2";    shift 2 ;;
+        --benchmarks)     BENCHMARKS="$2";  shift 2 ;;
+        --checkpoints)    CHECKPOINTS="$2"; shift 2 ;;
+        --max-gen-toks)   MAX_GEN_TOKS="$2"; shift 2 ;;
+        --load-in-4bit)   LOAD_IN_4BIT=true; shift  ;;
+        --load-in-8bit)   LOAD_IN_8BIT=true; shift  ;;
+        --lite)           LITE=true;        shift   ;;
+        --force)          FORCE=true;       shift   ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -122,6 +124,7 @@ if $FORCE;        then EXTRA_FLAGS="$EXTRA_FLAGS --force"; fi
 if $LITE;         then EXTRA_FLAGS="$EXTRA_FLAGS --lite"; fi
 if $LOAD_IN_4BIT; then EXTRA_FLAGS="$EXTRA_FLAGS --load-in-4bit"; fi
 if $LOAD_IN_8BIT; then EXTRA_FLAGS="$EXTRA_FLAGS --load-in-8bit"; fi
+if [[ -n "$MAX_GEN_TOKS" ]]; then EXTRA_FLAGS="$EXTRA_FLAGS --max-gen-toks $MAX_GEN_TOKS"; fi
 
 run_job() {
     local LABEL="$1" CKPT_PATH="$2" BENCH="$3" GPU_ID="$4"

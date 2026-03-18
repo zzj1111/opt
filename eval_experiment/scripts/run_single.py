@@ -171,6 +171,7 @@ def run_lm_eval(
     lite: bool = False,
     load_in_4bit: bool = False,
     load_in_8bit: bool = False,
+    max_gen_toks: int | None = None,
 ) -> dict:
     if device == "auto":
         device = detect_device()
@@ -183,6 +184,10 @@ def run_lm_eval(
     gen_kwargs = cfg.get("gen_kwargs", {}).copy()
     limit = cfg.get("limit")
     subsample_file = cfg.get("subsample_indices_file")
+
+    # --max-gen-toks overrides config
+    if max_gen_toks is not None:
+        gen_kwargs["max_gen_toks"] = max_gen_toks
 
     # --lite: override limit for quick local testing
     if lite:
@@ -274,6 +279,9 @@ def main():
                         help="Load model in 4-bit (bitsandbytes, requires CUDA)")
     parser.add_argument("--load-in-8bit", action="store_true",
                         help="Load model in 8-bit (bitsandbytes, requires CUDA)")
+    # Generation
+    parser.add_argument("--max-gen-toks", type=int, default=None,
+                        help="Override max generation tokens (e.g. 3072 to match RL training)")
     # Misc
     parser.add_argument("--no-think", action="store_true", default=True)
     parser.add_argument("--lite", action="store_true",
@@ -299,6 +307,7 @@ def main():
         lite=args.lite,
         load_in_4bit=args.load_in_4bit,
         load_in_8bit=args.load_in_8bit,
+        max_gen_toks=args.max_gen_toks,
     )
 
 
