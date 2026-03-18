@@ -183,7 +183,6 @@ def run_lm_eval(
     num_fewshot = cfg.get("num_fewshot", 0)
     gen_kwargs = cfg.get("gen_kwargs", {}).copy()
     limit = cfg.get("limit")
-    subsample_file = cfg.get("subsample_indices_file")
 
     # --max-gen-toks overrides config
     if max_gen_toks is not None:
@@ -218,11 +217,7 @@ def run_lm_eval(
         cmd += ["--gen_kwargs", gen_kwargs_str]
 
     # Sample limit
-    if subsample_file and Path(subsample_file).exists() and not lite:
-        with open(subsample_file) as f:
-            indices = json.load(f)
-        cmd += ["--limit", str(len(indices))]
-    elif limit is not None:
+    if limit is not None:
         cmd += ["--limit", str(limit)]
 
     env = os.environ.copy()

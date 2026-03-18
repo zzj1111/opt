@@ -9,6 +9,5 @@ gen_kwargs:
   do_sample: true
   top_k: 20
   max_gen_toks: 2048
-# Subsample to ~2K across subtasks; indices saved in results/indices/bbh.json
-subsample: 2000
-subsample_indices_file: results/indices/bbh.json
+# Limit to 2K samples for cost control (lm-eval --limit per subtask)
+limit: 2000
