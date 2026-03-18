@@ -1,0 +1,43 @@
+# Checkpoint registry for single-layer RLVR off-target capability evaluation.
+#
+# Fill in the actual paths after training completes.
+# Format:
+#   label: /absolute/path/to/hf_model  (the global_step_XXX/actor/huggingface/ dir)
+#
+# Labels must match the pattern used in aggregate.py:
+#   baseline, full_rlvr, layer_0 ... layer_27
+
+baseline: Qwen/Qwen3-1.7B   # HF hub model, no local path needed
+
+# Full RLVR (all 28 layers trained together)
+full_rlvr: /home/zha00175/opt_RL_ckpt/actor/huggingface
+
+# Single-layer RLVR checkpoints (only layer i trained, rest frozen)
+layer_0:  FILL_IN_PATH_LAYER_0/global_step_XXXX/actor/huggingface
+layer_1:  FILL_IN_PATH_LAYER_1/global_step_XXXX/actor/huggingface
+layer_2:  FILL_IN_PATH_LAYER_2/global_step_XXXX/actor/huggingface
+layer_3:  FILL_IN_PATH_LAYER_3/global_step_XXXX/actor/huggingface
+layer_4:  FILL_IN_PATH_LAYER_4/global_step_XXXX/actor/huggingface
+layer_5:  FILL_IN_PATH_LAYER_5/global_step_XXXX/actor/huggingface
+layer_6:  FILL_IN_PATH_LAYER_6/global_step_XXXX/actor/huggingface
+layer_7:  FILL_IN_PATH_LAYER_7/global_step_XXXX/actor/huggingface
+layer_8:  FILL_IN_PATH_LAYER_8/global_step_XXXX/actor/huggingface
+layer_9:  FILL_IN_PATH_LAYER_9/global_step_XXXX/actor/huggingface
+layer_10: FILL_IN_PATH_LAYER_10/global_step_XXXX/actor/huggingface
+layer_11: FILL_IN_PATH_LAYER_11/global_step_XXXX/actor/huggingface
+layer_12: FILL_IN_PATH_LAYER_12/global_step_XXXX/actor/huggingface
+layer_13: FILL_IN_PATH_LAYER_13/global_step_XXXX/actor/huggingface
+layer_14: FILL_IN_PATH_LAYER_14/global_step_XXXX/actor/huggingface
+layer_15: FILL_IN_PATH_LAYER_15/global_step_XXXX/actor/huggingface
+layer_16: FILL_IN_PATH_LAYER_16/global_step_XXXX/actor/huggingface
+layer_17: FILL_IN_PATH_LAYER_17/global_step_XXXX/actor/huggingface
+layer_18: FILL_IN_PATH_LAYER_18/global_step_XXXX/actor/huggingface
+layer_19: FILL_IN_PATH_LAYER_19/global_step_XXXX/actor/huggingface
+layer_20: FILL_IN_PATH_LAYER_20/global_step_XXXX/actor/huggingface
+layer_21: FILL_IN_PATH_LAYER_21/global_step_XXXX/actor/huggingface
+layer_22: FILL_IN_PATH_LAYER_22/global_step_XXXX/actor/huggingface
+layer_23: FILL_IN_PATH_LAYER_23/global_step_XXXX/actor/huggingface
+layer_24: FILL_IN_PATH_LAYER_24/global_step_XXXX/actor/huggingface
+layer_25: FILL_IN_PATH_LAYER_25/global_step_XXXX/actor/huggingface
+layer_26: FILL_IN_PATH_LAYER_26/global_step_XXXX/actor/huggingface
+layer_27: FILL_IN_PATH_LAYER_27/global_step_XXXX/actor/huggingface
