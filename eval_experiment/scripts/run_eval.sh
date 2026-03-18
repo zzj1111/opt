@@ -36,6 +36,7 @@ LOAD_IN_4BIT=false
 LOAD_IN_8BIT=false
 MAX_GEN_TOKS=""
 HF_UPLOAD_REPO=""
+CKPT_PATH_OVERRIDE=""
 
 ALL_BENCHMARKS="math500 gsm8k mbpp ifeval mmlu_pro bbh mgsm ceval"
 BENCHMARKS=""
@@ -51,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --registry)       REGISTRY="$2";    shift 2 ;;
         --benchmarks)     BENCHMARKS="$2";  shift 2 ;;
         --checkpoints)    CHECKPOINTS="$2"; shift 2 ;;
+        --ckpt-path)      CKPT_PATH_OVERRIDE="$2"; shift 2 ;;
         --max-gen-toks)   MAX_GEN_TOKS="$2"; shift 2 ;;
         --hf-upload)      HF_UPLOAD_REPO="$2"; shift 2 ;;
         --load-in-4bit)   LOAD_IN_4BIT=true; shift  ;;
@@ -105,18 +107,31 @@ echo "======================================================"
 
 # ── Build job list ───────────────────────────────────────────────────────────
 JOBS=()
-for LABEL in $CKPT_LABELS; do
-    CKPT_PATH=$(python3 - <<EOF
+if [[ -n "$CKPT_PATH_OVERRIDE" ]]; then
+    # Direct path mode: use --checkpoints as label(s), --ckpt-path as the model path
+    if [[ -z "$CHECKPOINTS" ]]; then
+        # Auto-generate label from path basename
+        CKPT_LABELS="$(basename "$CKPT_PATH_OVERRIDE")"
+    fi
+    for LABEL in $CKPT_LABELS; do
+        for BENCH in $BENCHMARKS; do
+            JOBS+=("$LABEL|$CKPT_PATH_OVERRIDE|$BENCH")
+        done
+    done
+else
+    for LABEL in $CKPT_LABELS; do
+        CKPT_PATH=$(python3 - <<EOF
 import yaml
 with open("$REGISTRY") as f:
     reg = yaml.safe_load(f)
 print(reg.get("$LABEL", ""))
 EOF
 )
-    for BENCH in $BENCHMARKS; do
-        JOBS+=("$LABEL|$CKPT_PATH|$BENCH")
+        for BENCH in $BENCHMARKS; do
+            JOBS+=("$LABEL|$CKPT_PATH|$BENCH")
+        done
     done
-done
+fi
 
 echo "Total jobs: ${#JOBS[@]}"
 
