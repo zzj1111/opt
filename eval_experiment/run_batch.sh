@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /code/hongpaul-sandbox/temp/OPT-RL/opt
-git pull
 cd eval_experiment/
 
 HF_TOKEN=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 \
