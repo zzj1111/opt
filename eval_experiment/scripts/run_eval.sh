@@ -38,7 +38,7 @@ MAX_GEN_TOKS=""
 HF_UPLOAD_REPO=""
 CKPT_PATH_OVERRIDE=""
 
-ALL_BENCHMARKS="math500 gsm8k mbpp ifeval mmlu_pro bbh mgsm ceval"
+ALL_BENCHMARKS="math500 gsm8k mbpp ifeval mmlu_pro bbh mgsm"
 BENCHMARKS=""
 CHECKPOINTS=""
 
