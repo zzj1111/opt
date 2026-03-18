@@ -24,8 +24,20 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    # Dummy jobs do not upload to wandb — only print GPU stats locally.
+    # Only log GPU utilisation stats to wandb — no model results.
     use_wandb = False
+    try:
+        import wandb
+        project = os.environ.get("WANDB_PROJECT", "verl_grpo_math")
+        run_name = os.environ.get("DUMMY_RUN_NAME", f"dummy_{os.uname().nodename}")
+        os.environ.setdefault("WANDB_API_KEY", "b8f38344ec7231ee89baa74ef7209dd5a43df6b2")
+        os.environ.setdefault("WANDB_ENTITY", "mhong-university-of-minnesota")
+        wandb.init(project=project, entity=os.environ["WANDB_ENTITY"],
+                   name=run_name, tags=["dummy"],
+                   config={"alloc_ratio": alloc_ratio, "num_gpus": torch.cuda.device_count()})
+        use_wandb = True
+    except Exception as e:
+        print(f"[dummy] wandb unavailable ({e}), running without logging")
 
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
@@ -128,6 +140,11 @@ def main():
         torch.cuda.empty_cache()
     except Exception:
         pass
+    if use_wandb:
+        try:
+            wandb.finish()
+        except Exception:
+            pass
     print("[dummy] Done.")
 
 
