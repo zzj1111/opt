@@ -103,15 +103,20 @@ def result_path(output_dir: str, ckpt_label: str, benchmark: str) -> Path:
 
 
 def already_done(output_dir: str, ckpt_label: str, benchmark: str) -> bool:
-    p = result_path(output_dir, ckpt_label, benchmark)
-    if not p.exists():
-        return False
-    try:
-        with open(p) as f:
-            data = json.load(f)
-        return "results" in data and "error" not in data
-    except Exception:
-        return False
+    """Check if a valid result file exists (with or without timestamp suffix)."""
+    prefix = f"{ckpt_label}__{benchmark}"
+    out_dir = Path(output_dir)
+    # Check both exact match and timestamped variants
+    candidates = sorted(out_dir.glob(f"{prefix}*.json"), reverse=True)
+    for p in candidates:
+        try:
+            with open(p) as f:
+                data = json.load(f)
+            if "results" in data and "error" not in data:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def extract_score(raw_result: dict, benchmark: str) -> float | None:
