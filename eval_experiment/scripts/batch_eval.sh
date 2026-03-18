@@ -40,6 +40,8 @@ OPTS=()
 SPECS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --force|--lite|--load-in-4bit|--load-in-8bit)
+            OPTS+=("$1"); shift ;;
         --*) OPTS+=("$1" "$2"); shift 2 ;;
         *)   SPECS+=("$1"); shift ;;
     esac
