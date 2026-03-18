@@ -35,6 +35,7 @@ LITE=false
 LOAD_IN_4BIT=false
 LOAD_IN_8BIT=false
 MAX_GEN_TOKS=""
+HF_UPLOAD_REPO=""
 
 ALL_BENCHMARKS="math500 gsm8k mbpp ifeval mmlu_pro bbh mgsm ceval"
 BENCHMARKS=""
@@ -51,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --benchmarks)     BENCHMARKS="$2";  shift 2 ;;
         --checkpoints)    CHECKPOINTS="$2"; shift 2 ;;
         --max-gen-toks)   MAX_GEN_TOKS="$2"; shift 2 ;;
+        --hf-upload)      HF_UPLOAD_REPO="$2"; shift 2 ;;
         --load-in-4bit)   LOAD_IN_4BIT=true; shift  ;;
         --load-in-8bit)   LOAD_IN_8BIT=true; shift  ;;
         --lite)           LITE=true;        shift   ;;
@@ -170,6 +172,22 @@ fi
 
 echo ""
 echo "======================================================"
-echo "All jobs complete. Run aggregate.py to build CSV:"
-echo "  python scripts/aggregate.py"
+echo "All eval jobs complete. Aggregating results..."
 echo "======================================================"
+
+# Auto-aggregate
+cd "$EVAL_DIR"
+python3 "$SCRIPT_DIR/aggregate.py" && echo "[ok] Aggregation done." || echo "[warn] Aggregation failed."
+
+# Upload to HF if requested
+if [[ -n "$HF_UPLOAD_REPO" ]]; then
+    echo ""
+    echo "======================================================"
+    echo "Uploading results to HF: $HF_UPLOAD_REPO"
+    echo "======================================================"
+    python3 "$SCRIPT_DIR/upload_results.py" \
+        --repo-id "$HF_UPLOAD_REPO" \
+        --results-dir "$EVAL_DIR/results" \
+    && echo "[ok] Upload done." \
+    || echo "[FAIL] Upload failed. Run manually: python scripts/upload_results.py --repo-id $HF_UPLOAD_REPO --results-dir results/"
+fi
