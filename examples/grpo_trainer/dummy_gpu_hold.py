@@ -10,13 +10,8 @@ import torch
 
 
 def main():
-    project = os.environ.get("WANDB_PROJECT", "verl_grpo_math")
-    run_name = os.environ.get("DUMMY_RUN_NAME", "dummy_gpu_hold")
     # How much free memory to allocate (lower = safer)
     alloc_ratio = float(os.environ.get("DUMMY_ALLOC_RATIO", "0.70"))
-
-    os.environ.setdefault("WANDB_API_KEY", "b8f38344ec7231ee89baa74ef7209dd5a43df6b2")
-    os.environ.setdefault("WANDB_ENTITY", "mhong-university-of-minnesota")
 
     # Graceful shutdown on SIGTERM (SLURM preemption sends this)
     shutdown = False
@@ -29,15 +24,8 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    # wandb init
+    # Dummy jobs do not upload to wandb — only print GPU stats locally.
     use_wandb = False
-    try:
-        import wandb
-        wandb.init(project=project, entity=os.environ["WANDB_ENTITY"],
-                   name=run_name, tags=["dummy"])
-        use_wandb = True
-    except Exception as e:
-        print(f"[dummy] wandb unavailable ({e}), running without logging")
 
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
@@ -140,11 +128,6 @@ def main():
         torch.cuda.empty_cache()
     except Exception:
         pass
-    if use_wandb:
-        try:
-            wandb.finish()
-        except Exception:
-            pass
     print("[dummy] Done.")
 
 
