@@ -24,7 +24,7 @@ CHECKPOINT_ORDER = (
 
 # Primary metric key per benchmark (matches run_single.py METRIC_KEYS)
 METRIC_KEYS = {
-    "math500":  "exact_match,none",
+    "math500":  "math_verify,none",
     "gsm8k":    "exact_match,flexible-extract",
     "mbpp":     "pass@1,none",
     "ifeval":   "prompt_level_strict_acc,none",
@@ -85,11 +85,17 @@ def load_all_scores(raw_dir: str) -> dict[str, dict[str, float | None]]:
     scores: dict[str, dict[str, float | None]] = {}
 
     for result_file in sorted(raw_dir.glob("*.json")):
-        name = result_file.stem  # e.g. "layer_13__mbpp"
+        name = result_file.stem  # e.g. "layer_13__mbpp_2026-03-18T20-18-49.391752"
         if "__" not in name:
             continue
-        ckpt_label, benchmark = name.split("__", 1)
-        if benchmark not in BENCHMARKS:
+        ckpt_label, rest = name.split("__", 1)
+        # Strip timestamp suffix: "gsm8k_2026-03-18T20-18-49.391752" -> "gsm8k"
+        benchmark = None
+        for b in BENCHMARKS:
+            if rest == b or rest.startswith(b + "_"):
+                benchmark = b
+                break
+        if benchmark is None:
             continue
 
         try:
