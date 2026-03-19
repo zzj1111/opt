@@ -12,7 +12,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # Defaults
-LR=5e-6
+LR=1e-6
 ROUND=""
 NOTE=""
 GPUS="0,1,2,3,4,5,6,7"
