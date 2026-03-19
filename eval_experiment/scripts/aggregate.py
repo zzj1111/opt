@@ -28,9 +28,9 @@ METRIC_KEYS = {
     "gsm8k":    "exact_match,flexible-extract",
     "mbpp":     "pass@1,none",
     "ifeval":   "prompt_level_strict_acc,none",
-    "mmlu_pro": "acc,none",
-    "bbh":      "acc_norm,none",
-    "mgsm":     "acc,none",
+    "mmlu_pro": "exact_match,custom-extract",
+    "bbh":      "exact_match,get-answer",
+    "mgsm":     "exact_match,flexible-extract",
     "ceval":    "acc,none",
 }
 
@@ -106,7 +106,10 @@ def load_all_scores(raw_dir: str) -> dict[str, dict[str, float | None]]:
             continue
 
         score = extract_score(raw, benchmark)
-        scores.setdefault(ckpt_label, {})[benchmark] = score
+        # Prefer valid scores over None; never overwrite a good score with None
+        existing = scores.setdefault(ckpt_label, {}).get(benchmark)
+        if score is not None or existing is None:
+            scores[ckpt_label][benchmark] = score if score is not None else existing
 
     return scores
 
