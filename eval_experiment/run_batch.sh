@@ -15,5 +15,7 @@ HF_TOKEN=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 bash scripts/batch_eval.sh \
 echo "========================================================"
 echo "  Eval done. Starting dummy GPU hold job..."
 echo "========================================================"
+# Run dummy from /tmp to avoid auto-importing verl (antlr4/omegaconf conflict)
+cd /tmp
 DUMMY_RUN_NAME="dummy_eval_$(hostname)_$(date +%m%d_%H%M)" \
     python /code/hongpaul-sandbox/temp/OPT-RL/opt/examples/grpo_trainer/dummy_gpu_hold.py
