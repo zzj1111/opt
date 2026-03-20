@@ -1,92 +1,93 @@
-"""MBPP reward: execute generated code against assert-based test cases."""
+"""MBPP reward function for veRL RL training.
+
+Evaluates Python code by running assert-based test cases from the dataset.
+Compatible with the MBPP parquet format where ground_truth contains:
+  {"test_list": ["assert func(...) == ...", ...], "test_setup_code": "...", "solution": "..."}
+"""
 
 import json
 import subprocess
 import tempfile
 import os
-import traceback
 
 
-def _run_tests(code: str, test_list: list[str], timeout: int = 10) -> bool:
-    """Execute code + assert statements via subprocess with timeout."""
-    full_code = code + "\n\n" + "\n".join(test_list)
-
-    # Write code to a temp file and execute via subprocess
-    # This works reliably inside Ray workers (unlike multiprocessing.Process)
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-        f.write(full_code)
-        tmp_path = f.name
-
-    try:
-        result = subprocess.run(
-            ['python3', tmp_path],
-            capture_output=True,
-            timeout=timeout,
-        )
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
-    except Exception:
-        return False
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-def compute_score(completion: str, ground_truth, continuous=False):
-    """Score a completion against MBPP test cases.
+def compute_score(solution_str, ground_truth, timeout=10):
+    """Score a code solution against MBPP test cases.
 
     Args:
-        completion: Model-generated response (may contain markdown code blocks).
-        ground_truth: JSON string or dict/list of test cases.
-        continuous: If True, return per-test-case scores.
+        solution_str: Model-generated text (may contain ```python blocks).
+        ground_truth: JSON string with test_list, test_setup_code, etc.
+        timeout: Execution timeout in seconds.
 
     Returns:
-        (score, metadata)
+        float: 1.0 if all tests pass, 0.0 otherwise.
     """
-    # Extract python code from markdown block if present
-    if "```python" in completion:
-        code = completion.split("```python")[-1].split("```")[0]
-    elif "```" in completion:
-        code = completion.split("```")[1].split("```")[0]
-    else:
-        code = completion
-
-    code = code.strip()
+    # Extract code from markdown blocks if present
+    code = _extract_code(solution_str)
+    if not code.strip():
+        return 0.0
 
     try:
         if isinstance(ground_truth, str):
-            parsed = json.loads(ground_truth)
+            test_data = json.loads(ground_truth)
         else:
-            parsed = ground_truth
+            test_data = ground_truth
+    except (json.JSONDecodeError, TypeError):
+        return 0.0
 
-        # Support both formats: direct list or dict with "test_list" key
-        if isinstance(parsed, dict):
-            test_list = parsed.get("test_list", [])
-            setup_code = parsed.get("test_setup_code", "")
-            if setup_code:
-                code = setup_code + "\n" + code
-        elif isinstance(parsed, list):
-            test_list = parsed
-        else:
-            test_list = []
+    test_list = test_data.get("test_list", [])
+    test_setup_code = test_data.get("test_setup_code", "")
 
-        if not continuous:
-            success = _run_tests(code, test_list, timeout=10)
-            return float(success), {"passed": success}
-        else:
-            # Per-test scoring
-            results = []
-            for test in test_list:
-                passed = _run_tests(code, [test], timeout=5)
-                results.append(passed)
+    if not test_list:
+        return 0.0
 
-            score = sum(results) / max(len(results), 1)
-            metadata = [{"test": t, "passed": p} for t, p in zip(test_list, results)]
-            return score, metadata
+    # Build the full test script
+    parts = []
+    if test_setup_code:
+        parts.append(test_setup_code)
+    parts.append(code.strip())
+    parts.append("")  # blank line
+    parts.extend(test_list)
+    full_code = "\n".join(parts)
 
+    return _run_code(full_code, timeout)
+
+
+def _extract_code(text: str) -> str:
+    """Extract Python code from model output."""
+    # Remove thinking tags
+    import re
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    if "```python" in text:
+        return text.split("```python")[-1].split("```")[0]
+    elif "```" in text:
+        blocks = text.split("```")
+        if len(blocks) >= 3:
+            return blocks[1]
+    return text
+
+
+def _run_code(code: str, timeout: int) -> float:
+    """Execute code in a subprocess and return 1.0 on success, 0.0 on failure."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = f.name
+        result = subprocess.run(
+            ["python3", tmp_path],
+            capture_output=True,
+            timeout=timeout,
+        )
+        return 1.0 if result.returncode == 0 else 0.0
+    except subprocess.TimeoutExpired:
+        return 0.0
     except Exception:
-        traceback.print_exc(5)
-        return 0.0, {"error": "execution_failed"}
+        return 0.0
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
