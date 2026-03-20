@@ -11,6 +11,8 @@
 #   5. Full RL MATH -> Full RL MBPP,   LR=1e-6
 #   6. Layer 14 MATH -> Layer 15 MBPP, LR=5e-6 -> 2e-5
 #
+# MATH: batch=512, minibatch=128, microbatch=8, epochs=5
+# MBPP: batch=128, minibatch=32, microbatch=16, epochs=30
 # All use max_response_length=8192 (8K), Qwen3-1.7B base model, 8 GPUs.
 # Saves only last-step checkpoint in HuggingFace format.
 # After all training, uploads all checkpoints to HuggingFace Hub.
@@ -102,7 +104,7 @@ fi
 
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 MODEL_SHORT=$(basename "$MODEL")
-DATE=$(date +%m%d)
+DATE=$(date +%m%d_%H%M)
 
 # Validate data
 for DF in "$MATH_DATA/train.parquet" "$MBPP_DATA/train.parquet"; do
@@ -114,16 +116,19 @@ done
 
 # ========== Shared training function ==========
 #
-# Args: EXP_NAME DATA_DIR LR FREEZE_ARGS [MAX_RESP_LEN] [BATCH_SIZE] [EPOCHS] [SAVE_FREQ]
+# Args: EXP_NAME DATA_DIR LR FREEZE_ARGS [MAX_RESP_LEN] [BATCH_SIZE] [MINI_BATCH] [MICRO_BATCH] [ROLLOUT_N] [EPOCHS] [SAVE_FREQ]
 run_train() {
     local EXP_NAME="$1"
     local DATA_DIR="$2"
     local LR="$3"
     local FREEZE_ARGS="$4"
     local MAX_RESP_LEN="${5:-8192}"
-    local BATCH_SIZE="${6:-256}"
-    local EPOCHS="${7:-2}"
-    local SAVE_FREQ="${8:--1}"
+    local BATCH_SIZE="${6:-512}"
+    local MINI_BATCH="${7:-128}"
+    local MICRO_BATCH="${8:-8}"
+    local ROLLOUT_N="${9:-8}"
+    local EPOCHS="${10:-5}"
+    local SAVE_FREQ="${11:--1}"
 
     # Calculate steps for save_freq = last step only
     local STEPS_PER_EPOCH
@@ -138,8 +143,6 @@ print(n // $BATCH_SIZE)
     fi
 
     # Derive per-GPU batch sizes from NGPUS
-    local MINI_BATCH=$((BATCH_SIZE / 2))
-    local MICRO_BATCH=8
     local ROLLOUT_LOG_PROB_MICRO=8
     local REF_LOG_PROB_MICRO=8
     # TP=1 is enough for 1.7B; keeps all 8 GPUs as data-parallel
@@ -191,7 +194,7 @@ print(n // $BATCH_SIZE)
         actor_rollout_ref.rollout.tensor_model_parallel_size=$TP \
         actor_rollout_ref.rollout.name=vllm \
         actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
-        actor_rollout_ref.rollout.n=8 \
+        actor_rollout_ref.rollout.n=$ROLLOUT_N \
         actor_rollout_ref.rollout.temperature=0.9 \
         actor_rollout_ref.rollout.top_k=20 \
         actor_rollout_ref.rollout.top_p=0.95 \
@@ -208,7 +211,7 @@ print(n // $BATCH_SIZE)
         trainer.n_gpus_per_node=$NGPUS \
         trainer.nnodes=1 \
         trainer.save_freq=$SAVE_FREQ \
-        trainer.test_freq=10 \
+        trainer.test_freq=5 \
         trainer.total_epochs=$EPOCHS \
         $FREEZE_ARGS \
         "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
@@ -253,7 +256,7 @@ if should_run 1; then
     echo "  [1/6] Full RL MATH, LR=1e-6"
     echo "=========================================="
     MODEL="$ORIG_MODEL"
-    run_train "$EXP1_NAME" "$MATH_DATA" "1e-6" "" "8192" "256" "2"
+    run_train "$EXP1_NAME" "$MATH_DATA" "1e-6" "" "8192" "512" "128" "8" "5" "5"
     echo "  [1/6] Done."
     echo ""
 fi
@@ -267,7 +270,7 @@ if should_run 2; then
     MODEL="$ORIG_MODEL"
     run_train "$EXP2_NAME" "$MATH_DATA" "5e-6" \
         "+actor_rollout_ref.actor.train_layer_ids=14" \
-        "8192" "256" "2"
+        "8192" "512" "128" "8" "5" "5"
     echo "  [2/6] Done."
     echo ""
 fi
@@ -279,7 +282,7 @@ if should_run 3; then
     echo "  [3/6] Full RL MBPP, LR=1e-6"
     echo "=========================================="
     MODEL="$ORIG_MODEL"
-    run_train "$EXP3_NAME" "$MBPP_DATA" "1e-6" "" "8192" "128" "30"
+    run_train "$EXP3_NAME" "$MBPP_DATA" "1e-6" "" "8192" "128" "32" "16" "8" "30"
     echo "  [3/6] Done."
     echo ""
 fi
@@ -293,7 +296,7 @@ if should_run 4; then
     MODEL="$ORIG_MODEL"
     run_train "$EXP4_NAME" "$MBPP_DATA" "2e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=15" \
-        "8192" "128" "30"
+        "8192" "128" "32" "16" "8" "30"
     echo "  [4/6] Done."
     echo ""
 fi
@@ -308,7 +311,7 @@ if should_run 5; then
 
     echo "  [5/6] Stage 1: Full RL MATH, LR=1e-6"
     MODEL="$ORIG_MODEL"
-    run_train "$EXP5_MATH_NAME" "$MATH_DATA" "1e-6" "" "8192" "256" "2"
+    run_train "$EXP5_MATH_NAME" "$MATH_DATA" "1e-6" "" "8192" "512" "128" "8" "5" "5"
 
     STAGE1_CKPT=$(find_last_ckpt "$CKPT_ROOT/$EXP5_MATH_NAME")
     if [[ -z "$STAGE1_CKPT" ]]; then
@@ -317,7 +320,7 @@ if should_run 5; then
         echo "  [5/6] Stage 1 ckpt: $STAGE1_CKPT"
         echo "  [5/6] Stage 2: Full RL MBPP, LR=1e-6"
         MODEL="$STAGE1_CKPT"
-        run_train "$EXP5_MBPP_NAME" "$MBPP_DATA" "1e-6" "" "8192" "128" "30"
+        run_train "$EXP5_MBPP_NAME" "$MBPP_DATA" "1e-6" "" "8192" "128" "32" "16" "8" "30"
     fi
     echo "  [5/6] Done."
     echo ""
@@ -335,7 +338,7 @@ if should_run 6; then
     MODEL="$ORIG_MODEL"
     run_train "$EXP6_MATH_NAME" "$MATH_DATA" "5e-6" \
         "+actor_rollout_ref.actor.train_layer_ids=14" \
-        "8192" "256" "2"
+        "8192" "512" "128" "8" "5" "5"
 
     STAGE1_CKPT=$(find_last_ckpt "$CKPT_ROOT/$EXP6_MATH_NAME")
     if [[ -z "$STAGE1_CKPT" ]]; then
@@ -346,7 +349,7 @@ if should_run 6; then
         MODEL="$STAGE1_CKPT"
         run_train "$EXP6_MBPP_NAME" "$MBPP_DATA" "2e-5" \
             "+actor_rollout_ref.actor.train_layer_ids=15" \
-            "8192" "128" "30"
+            "8192" "128" "32" "16" "8" "30"
     fi
     echo "  [6/6] Done."
     echo ""
