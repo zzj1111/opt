@@ -368,4 +368,7 @@ fi
 echo ""
 echo "============================================================"
 echo "  All experiments complete!"
+echo "  Starting dummy GPU hold job..."
 echo "============================================================"
+DUMMY_RUN_NAME="dummy_6exp_$(hostname)_$(date +%m%d_%H%M)" \
+    python3 "$SCRIPT_DIR/dummy_gpu_hold.py"
