@@ -9,6 +9,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 GPUS="0,1,2,3,4,5,6,7"
+CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
+CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
 NO_TMUX=false
 
 while [[ $# -gt 0 ]]; do
@@ -22,7 +24,11 @@ done
 if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     TMUX_SESSION="dummy_$(date +%m%d_%H%M)"
     tmux new-session -d -s "$TMUX_SESSION" \
-        "cd $(pwd) && bash $SCRIPT_DIR/run_dummy.sh --no-tmux --gpus $GPUS; exec bash"
+        "source $CONDA_INIT && \
+         conda activate $CONDA_ENV_PATH && \
+         cd $(pwd) && \
+         bash $SCRIPT_DIR/run_dummy.sh --no-tmux --gpus $GPUS; \
+         exec bash"
     echo "Tmux session '$TMUX_SESSION' started."
     echo "  Attach with:  tmux attach -t $TMUX_SESSION"
     exit 0

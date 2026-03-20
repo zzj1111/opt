@@ -40,6 +40,8 @@ MATH_DATA="$PROJ_DIR/data/math"
 MBPP_DATA="$PROJ_DIR/data/mbpp"
 HF_TOKEN="${HF_TOKEN:-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}"
 HF_REPO_PREFIX=""
+CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
+CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
 SKIP=0
 ONLY=""
 DO_UPLOAD=true
@@ -88,7 +90,9 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     for arg in "${EXTRA_ARGS[@]}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
 
     tmux new-session -d -s "$TMUX_SESSION" \
-        "cd $PROJ_DIR && \
+        "source $CONDA_INIT && \
+         conda activate $CONDA_ENV_PATH && \
+         cd $PROJ_DIR && \
          bash $SCRIPT_DIR/run_6experiments.sh $FULL_ARGS; \
          exec bash"
     echo "Tmux session '$TMUX_SESSION' started."
