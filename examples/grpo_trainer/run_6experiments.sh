@@ -201,7 +201,7 @@ print(n // $BATCH_SIZE)
         actor_rollout_ref.ref.fsdp_config.param_offload=True \
         algorithm.use_kl_in_reward=False \
         trainer.critic_warmup=0 \
-        "trainer.logger='[\"console\",\"wandb\"]'" \
+        trainer.logger='["console","wandb"]' \
         trainer.project_name=rl_6experiments \
         "trainer.experiment_name='$EXP_NAME'" \
         "trainer.default_local_dir='$CKPT_ROOT/$EXP_NAME'" \
