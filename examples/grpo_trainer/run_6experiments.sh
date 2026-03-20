@@ -61,6 +61,41 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+NO_TMUX=false
+for i in "${!EXTRA_ARGS[@]}"; do
+    if [[ "${EXTRA_ARGS[$i]}" == "--no-tmux" ]]; then
+        NO_TMUX=true
+        unset 'EXTRA_ARGS[$i]'
+    fi
+done
+
+# If not inside tmux, launch a tmux session and re-run inside it
+if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
+    TMUX_SESSION="6exp_$(date +%m%d_%H%M)"
+
+    # Reconstruct args
+    FULL_ARGS="--no-tmux"
+    FULL_ARGS="$FULL_ARGS --gpus $(printf '%q' "$GPUS")"
+    FULL_ARGS="$FULL_ARGS --model $(printf '%q' "$MODEL")"
+    FULL_ARGS="$FULL_ARGS --ckpt-root $(printf '%q' "$CKPT_ROOT")"
+    FULL_ARGS="$FULL_ARGS --math-data $(printf '%q' "$MATH_DATA")"
+    FULL_ARGS="$FULL_ARGS --mbpp-data $(printf '%q' "$MBPP_DATA")"
+    [[ $SKIP -gt 0 ]] && FULL_ARGS="$FULL_ARGS --skip $SKIP"
+    [[ -n "$ONLY" ]] && FULL_ARGS="$FULL_ARGS --only $(printf '%q' "$ONLY")"
+    [[ "$DO_UPLOAD" == "false" ]] && FULL_ARGS="$FULL_ARGS --no-upload"
+    [[ -n "$HF_TOKEN" ]] && FULL_ARGS="$FULL_ARGS --hf-token $(printf '%q' "$HF_TOKEN")"
+    [[ -n "$HF_REPO_PREFIX" ]] && FULL_ARGS="$FULL_ARGS --hf-repo-prefix $(printf '%q' "$HF_REPO_PREFIX")"
+    for arg in "${EXTRA_ARGS[@]}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
+
+    tmux new-session -d -s "$TMUX_SESSION" \
+        "cd $PROJ_DIR && \
+         bash $SCRIPT_DIR/run_6experiments.sh $FULL_ARGS; \
+         exec bash"
+    echo "Tmux session '$TMUX_SESSION' started."
+    echo "  Attach with:  tmux attach -t $TMUX_SESSION"
+    exit 0
+fi
+
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 MODEL_SHORT=$(basename "$MODEL")
 DATE=$(date +%m%d)
