@@ -1,22 +1,22 @@
 #!/bin/bash
 # ==============================================================================
-# 4 Experiments: Qwen3-1.7B RL training with MATH
+# 4 Experiments: Qwen3-1.7B RL training with NuminaMath-CoT
 # ==============================================================================
 #
 # Experiments:
-#   1. Full RL MATH,           LR=1e-6
-#   2. Layer 14 only MATH,     LR=5e-6
-#   3. Layer 0 only MATH,      LR=1e-5
-#   4. Layer 27 only MATH,     LR=1e-5
+#   1. Full RL NuminaMath-CoT,           LR=1e-6
+#   2. Full RL NuminaMath-CoT,           LR=5e-6
+#   3. Full RL NuminaMath-CoT,           LR=1e-5
+#   4. Layer 14 only NuminaMath-CoT,     LR=5e-6
 #
 # All: batch=512, minibatch=128, microbatch=8, epochs=8, max_response_length=8192
-# Model: Qwen3-1.7B, saves only last-step checkpoint in HuggingFace format.
+# Model: Qwen3-1.7B, 8 GPUs, saves only last-step checkpoint in HuggingFace format.
 #
 # Usage:
-#   bash ath_run_qwen3-8b.sh                          # Run all 4
-#   bash ath_run_qwen3-8b.sh --gpus 0,1,2,3           # Use specific GPUs
-#   bash ath_run_qwen3-8b.sh --skip 2                  # Skip first 2
-#   bash ath_run_qwen3-8b.sh --only 1,3                # Run only 1 and 3
+#   bash run_numina_cot_4exp.sh                          # Run all 4
+#   bash run_numina_cot_4exp.sh --gpus 0,1,2,3,4,5,6,7  # Use specific GPUs
+#   bash run_numina_cot_4exp.sh --skip 2                 # Skip first 2
+#   bash run_numina_cot_4exp.sh --only 1,3               # Run only 1 and 3
 #
 # Environment variables:
 #   WANDB_API_KEY       - Weights & Biases API key
@@ -29,11 +29,9 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 # ========== Configuration ==========
 MODEL="Qwen/Qwen3-1.7B"
-GPUS="0,1,2,3"
+GPUS="0,1,2,3,4,5,6,7"
 CKPT_ROOT="$PROJ_DIR/checkpoints"
-MATH_DATA="$PROJ_DIR/data/math"
-# CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
-# CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
+DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 SKIP=0
 ONLY=""
 EXTRA_ARGS=()
@@ -43,7 +41,7 @@ while [[ $# -gt 0 ]]; do
         --gpus)            GPUS="$2"; shift 2 ;;
         --model)           MODEL="$2"; shift 2 ;;
         --ckpt-root)       CKPT_ROOT="$2"; shift 2 ;;
-        --math-data)       MATH_DATA="$2"; shift 2 ;;
+        --data-dir)        DATA_DIR="$2"; shift 2 ;;
         --skip)            SKIP="$2"; shift 2 ;;
         --only)            ONLY="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
@@ -58,38 +56,13 @@ for i in "${!EXTRA_ARGS[@]}"; do
     fi
 done
 
-# If not inside tmux, launch a tmux session and re-run inside it
-# if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
-#     TMUX_SESSION="4exp_$(date +%m%d_%H%M)"
-
-#     # Reconstruct args
-#     FULL_ARGS="--no-tmux"
-#     FULL_ARGS="$FULL_ARGS --gpus $(printf '%q' "$GPUS")"
-#     FULL_ARGS="$FULL_ARGS --model $(printf '%q' "$MODEL")"
-#     FULL_ARGS="$FULL_ARGS --ckpt-root $(printf '%q' "$CKPT_ROOT")"
-#     FULL_ARGS="$FULL_ARGS --math-data $(printf '%q' "$MATH_DATA")"
-#     [[ $SKIP -gt 0 ]] && FULL_ARGS="$FULL_ARGS --skip $SKIP"
-#     [[ -n "$ONLY" ]] && FULL_ARGS="$FULL_ARGS --only $(printf '%q' "$ONLY")"
-#     for arg in "${EXTRA_ARGS[@]}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
-
-#     tmux new-session -d -s "$TMUX_SESSION" \
-#         "source $CONDA_INIT && \
-#          conda activate $CONDA_ENV_PATH && \
-#          cd $PROJ_DIR && \
-#          bash $SCRIPT_DIR/ath_run_qwen3-8b.sh $FULL_ARGS; \
-#          exec bash"
-#     echo "Tmux session '$TMUX_SESSION' started."
-#     echo "  Attach with:  tmux attach -t $TMUX_SESSION"
-#     exit 0
-# fi
-
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 MODEL_SHORT=$(basename "$MODEL")
 DATE=$(date +%m%d_%H%M)
 
 # Validate data
-if [[ ! -f "$MATH_DATA/train.parquet" ]]; then
-    echo "ERROR: Data not found: $MATH_DATA/train.parquet"
+if [[ ! -f "$DATA_DIR/train.parquet" ]]; then
+    echo "ERROR: Data not found: $DATA_DIR/train.parquet"
     exit 1
 fi
 
@@ -101,7 +74,7 @@ run_train() {
     local DATA_DIR="$2"
     local LR="$3"
     local FREEZE_ARGS="$4"
-    local MAX_RESP_LEN="${5:-3072}"
+    local MAX_RESP_LEN="${5:-8192}"
     local BATCH_SIZE="${6:-512}"
     local MINI_BATCH="${7:-128}"
     local MICRO_BATCH="${8:-8}"
@@ -182,7 +155,7 @@ print(n // $BATCH_SIZE)
         algorithm.use_kl_in_reward=False \
         trainer.critic_warmup=0 \
         trainer.logger='["console","wandb"]' \
-        trainer.project_name=verl_grpo_math \
+        trainer.project_name=verl_grpo_numina_cot \
         "trainer.experiment_name='$EXP_NAME'" \
         "trainer.default_local_dir='$CKPT_ROOT/$EXP_NAME'" \
         trainer.n_gpus_per_node=$NGPUS \
@@ -204,58 +177,54 @@ should_run() {
 
 # ========== Run Experiments ==========
 echo "============================================================"
-echo "  4 Experiments: Qwen3-1.7B RL Training on MATH"
+echo "  4 Experiments: Qwen3-1.7B RL Training on NuminaMath-CoT"
 echo "  Model: $MODEL | GPUs: $GPUS ($NGPUS)"
-echo "  MATH data: $MATH_DATA"
+echo "  Data: $DATA_DIR"
 echo "  Checkpoint root: $CKPT_ROOT"
 echo "============================================================"
 echo ""
 
-# --- Exp 1: Full RL MATH, LR=1e-6 ---
-EXP1_NAME="${DATE}_exp1_full_math_lr1e-6"
+# --- Exp 1: Full RL NuminaMath-CoT, LR=1e-6 ---
+EXP1_NAME="${DATE}_exp1_full_numina_cot_lr1e-6"
 if should_run 1; then
     echo "=========================================="
-    echo "  [1/4] Full RL MATH, LR=1e-6, epochs=8"
+    echo "  [1/4] Full RL NuminaMath-CoT, LR=1e-6, epochs=8"
     echo "=========================================="
-    run_train "$EXP1_NAME" "$MATH_DATA" "1e-6" "" "8192" "512" "128" "8" "5" "8"
+    run_train "$EXP1_NAME" "$DATA_DIR" "1e-6" "" "8192" "512" "128" "8" "5" "8"
     echo "  [1/4] Done."
     echo ""
 fi
 
-# --- Exp 2: Layer 14 only MATH, LR=5e-6 ---
-EXP2_NAME="${DATE}_exp2_layer14_math_lr5e-6"
+# --- Exp 2: Full RL NuminaMath-CoT, LR=5e-6 ---
+EXP2_NAME="${DATE}_exp2_full_numina_cot_lr5e-6"
 if should_run 2; then
     echo "=========================================="
-    echo "  [2/4] Layer 14 MATH, LR=5e-6, epochs=8"
+    echo "  [2/4] Full RL NuminaMath-CoT, LR=5e-6, epochs=8"
     echo "=========================================="
-    run_train "$EXP2_NAME" "$MATH_DATA" "5e-6" \
-        "+actor_rollout_ref.actor.train_layer_ids=14" \
-        "8192" "512" "128" "8" "5" "8"
+    run_train "$EXP2_NAME" "$DATA_DIR" "5e-6" "" "8192" "512" "128" "8" "5" "8"
     echo "  [2/4] Done."
     echo ""
 fi
 
-# --- Exp 3: Layer 0 only MATH, LR=1e-5 ---
-EXP3_NAME="${DATE}_exp3_layer0_math_lr1e-5"
+# --- Exp 3: Full RL NuminaMath-CoT, LR=1e-5 ---
+EXP3_NAME="${DATE}_exp3_full_numina_cot_lr1e-5"
 if should_run 3; then
     echo "=========================================="
-    echo "  [3/4] Layer 0 MATH, LR=1e-5, epochs=8"
+    echo "  [3/4] Full RL NuminaMath-CoT, LR=1e-5, epochs=8"
     echo "=========================================="
-    run_train "$EXP3_NAME" "$MATH_DATA" "1e-5" \
-        "+actor_rollout_ref.actor.train_layer_ids=0" \
-        "8192" "512" "128" "8" "5" "8"
+    run_train "$EXP3_NAME" "$DATA_DIR" "1e-5" "" "8192" "512" "128" "8" "5" "8"
     echo "  [3/4] Done."
     echo ""
 fi
 
-# --- Exp 4: Layer 27 only MATH, LR=1e-5 ---
-EXP4_NAME="${DATE}_exp4_layer27_math_lr1e-5"
+# --- Exp 4: Layer 14 only NuminaMath-CoT, LR=5e-6 ---
+EXP4_NAME="${DATE}_exp4_layer14_numina_cot_lr5e-6"
 if should_run 4; then
     echo "=========================================="
-    echo "  [4/4] Layer 27 MATH, LR=1e-5, epochs=8"
+    echo "  [4/4] Layer 14 NuminaMath-CoT, LR=5e-6, epochs=8"
     echo "=========================================="
-    run_train "$EXP4_NAME" "$MATH_DATA" "1e-5" \
-        "+actor_rollout_ref.actor.train_layer_ids=27" \
+    run_train "$EXP4_NAME" "$DATA_DIR" "5e-6" \
+        "+actor_rollout_ref.actor.train_layer_ids=14" \
         "8192" "512" "128" "8" "5" "8"
     echo "  [4/4] Done."
     echo ""
@@ -266,5 +235,5 @@ echo "============================================================"
 echo "  All experiments complete!"
 echo "  Starting dummy GPU hold job..."
 echo "============================================================"
-DUMMY_RUN_NAME="dummy_4exp_$(hostname)_$(date +%m%d_%H%M)" \
+DUMMY_RUN_NAME="dummy_numina_4exp_$(hostname)_$(date +%m%d_%H%M)" \
     python3 "$SCRIPT_DIR/dummy_gpu_hold.py"
