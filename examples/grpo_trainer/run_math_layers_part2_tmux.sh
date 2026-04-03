@@ -1,16 +1,16 @@
 #!/bin/bash
 # ==============================================================================
-# 5 Experiments (Part 2): Qwen3-1.7B single-layer RL training with MATH (with tmux)
+# 5 Experiments (Part 2): Qwen3-1.7B single-layer RL training with NuminaMath-CoT (with tmux)
 # ==============================================================================
 #
 # Experiments:
-#   1. Layer 15 only MATH,     LR=5e-5
-#   2. Layer 18 only MATH,     LR=5e-5
-#   3. Layer 21 only MATH,     LR=5e-5
-#   4. Layer 24 only MATH,     LR=5e-5
-#   5. Layer 27 only MATH,     LR=5e-5
+#   1. Layer 15 only NuminaMath-CoT,     LR=5e-5
+#   2. Layer 18 only NuminaMath-CoT,     LR=5e-5
+#   3. Layer 21 only NuminaMath-CoT,     LR=5e-5
+#   4. Layer 24 only NuminaMath-CoT,     LR=5e-5
+#   5. Layer 27 only NuminaMath-CoT,     LR=5e-5
 #
-# All: batch=512, minibatch=128, microbatch=8, epochs=8, max_response_length=3072
+# All: batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072
 # Model: Qwen3-1.7B, 8 GPUs, saves only last-step checkpoint in HuggingFace format.
 #
 # Usage:
@@ -29,7 +29,7 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 MODEL="Qwen/Qwen3-1.7B"
 GPUS="0,1,2,3,4,5,6,7"
 CKPT_ROOT="$PROJ_DIR/checkpoints"
-DATA_DIR="$PROJ_DIR/data/math"
+DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
 SKIP=0
@@ -95,7 +95,7 @@ run_train() {
     local MINI_BATCH="${7:-128}"
     local MICRO_BATCH="${8:-8}"
     local ROLLOUT_N="${9:-5}"
-    local EPOCHS="${10:-8}"
+    local EPOCHS="${10:-2}"
     local SAVE_FREQ="${11:--1}"
 
     local STEPS_PER_EPOCH
@@ -170,7 +170,7 @@ print(n // $BATCH_SIZE)
         algorithm.use_kl_in_reward=False \
         trainer.critic_warmup=0 \
         trainer.logger='["console","wandb"]' \
-        trainer.project_name=verl_grpo_math \
+        trainer.project_name=verl_grpo_numina_cot \
         "trainer.experiment_name='$EXP_NAME'" \
         "trainer.default_local_dir='$CKPT_ROOT/$EXP_NAME'" \
         trainer.n_gpus_per_node=$NGPUS \
@@ -192,8 +192,8 @@ should_run() {
 
 # ========== Run Experiments ==========
 echo "============================================================"
-echo "  5 Experiments (Part 2): Single-Layer RL on MATH"
-echo "  Layers: 15, 18, 21, 24, 27 | LR=5e-5 | epochs=8"
+echo "  5 Experiments (Part 2): Single-Layer RL on NuminaMath-CoT"
+echo "  Layers: 15, 18, 21, 24, 27 | LR=5e-5 | epochs=2"
 echo "  Model: $MODEL | GPUs: $GPUS ($NGPUS)"
 echo "  Data: $DATA_DIR"
 echo "  Checkpoint root: $CKPT_ROOT"
@@ -201,10 +201,10 @@ echo "============================================================"
 echo ""
 
 # --- Exp 1: Layer 15 ---
-EXP1_NAME="${DATE}_exp1_layer15_math_lr5e-5"
+EXP1_NAME="${DATE}_exp1_layer15_numina_cot_lr5e-5"
 if should_run 1; then
     echo "=========================================="
-    echo "  [1/5] Layer 15 MATH, LR=5e-5"
+    echo "  [1/5] Layer 15 NuminaMath-CoT, LR=5e-5"
     echo "=========================================="
     run_train "$EXP1_NAME" "$DATA_DIR" "5e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=15"
@@ -213,10 +213,10 @@ if should_run 1; then
 fi
 
 # --- Exp 2: Layer 18 ---
-EXP2_NAME="${DATE}_exp2_layer18_math_lr5e-5"
+EXP2_NAME="${DATE}_exp2_layer18_numina_cot_lr5e-5"
 if should_run 2; then
     echo "=========================================="
-    echo "  [2/5] Layer 18 MATH, LR=5e-5"
+    echo "  [2/5] Layer 18 NuminaMath-CoT, LR=5e-5"
     echo "=========================================="
     run_train "$EXP2_NAME" "$DATA_DIR" "5e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=18"
@@ -225,10 +225,10 @@ if should_run 2; then
 fi
 
 # --- Exp 3: Layer 21 ---
-EXP3_NAME="${DATE}_exp3_layer21_math_lr5e-5"
+EXP3_NAME="${DATE}_exp3_layer21_numina_cot_lr5e-5"
 if should_run 3; then
     echo "=========================================="
-    echo "  [3/5] Layer 21 MATH, LR=5e-5"
+    echo "  [3/5] Layer 21 NuminaMath-CoT, LR=5e-5"
     echo "=========================================="
     run_train "$EXP3_NAME" "$DATA_DIR" "5e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=21"
@@ -237,10 +237,10 @@ if should_run 3; then
 fi
 
 # --- Exp 4: Layer 24 ---
-EXP4_NAME="${DATE}_exp4_layer24_math_lr5e-5"
+EXP4_NAME="${DATE}_exp4_layer24_numina_cot_lr5e-5"
 if should_run 4; then
     echo "=========================================="
-    echo "  [4/5] Layer 24 MATH, LR=5e-5"
+    echo "  [4/5] Layer 24 NuminaMath-CoT, LR=5e-5"
     echo "=========================================="
     run_train "$EXP4_NAME" "$DATA_DIR" "5e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=24"
@@ -249,10 +249,10 @@ if should_run 4; then
 fi
 
 # --- Exp 5: Layer 27 ---
-EXP5_NAME="${DATE}_exp5_layer27_math_lr5e-5"
+EXP5_NAME="${DATE}_exp5_layer27_numina_cot_lr5e-5"
 if should_run 5; then
     echo "=========================================="
-    echo "  [5/5] Layer 27 MATH, LR=5e-5"
+    echo "  [5/5] Layer 27 NuminaMath-CoT, LR=5e-5"
     echo "=========================================="
     run_train "$EXP5_NAME" "$DATA_DIR" "5e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=27"
@@ -265,5 +265,5 @@ echo "============================================================"
 echo "  Part 2 complete!"
 echo "  Starting dummy GPU hold job..."
 echo "============================================================"
-DUMMY_RUN_NAME="dummy_math_layers_p2_$(hostname)_$(date +%m%d_%H%M)" \
+DUMMY_RUN_NAME="dummy_numina_layers_p2_$(hostname)_$(date +%m%d_%H%M)" \
     python3 "$SCRIPT_DIR/dummy_gpu_hold.py"
