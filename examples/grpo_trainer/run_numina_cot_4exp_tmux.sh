@@ -97,11 +97,11 @@ run_train() {
     local LR="$3"
     local FREEZE_ARGS="$4"
     local MAX_RESP_LEN="${5:-8192}"
-    local BATCH_SIZE="${6:-512}"
-    local MINI_BATCH="${7:-128}"
-    local MICRO_BATCH="${8:-8}"
+    local BATCH_SIZE="${6:-256}"
+    local MINI_BATCH="${7:-64}"
+    local MICRO_BATCH="${8:-4}"
     local ROLLOUT_N="${9:-5}"
-    local EPOCHS="${10:-8}"
+    local EPOCHS="${10:-2}"
     local SAVE_FREQ="${11:--1}"
 
     # Calculate steps for save_freq = last step only
@@ -116,8 +116,8 @@ print(n // $BATCH_SIZE)
         SAVE_FREQ=$TOTAL_STEPS
     fi
 
-    local ROLLOUT_LOG_PROB_MICRO=16
-    local REF_LOG_PROB_MICRO=16
+    local ROLLOUT_LOG_PROB_MICRO=8
+    local REF_LOG_PROB_MICRO=8
     local TP=1
 
     mkdir -p "$CKPT_ROOT/$EXP_NAME"
