@@ -4,11 +4,11 @@
 # ==============================================================================
 #
 # Experiments:
-#   1. Layer 0 only NuminaMath-CoT,      LR=5e-5
-#   2. Layer 3 only NuminaMath-CoT,      LR=5e-5
-#   3. Layer 6 only NuminaMath-CoT,      LR=5e-5
-#   4. Layer 9 only NuminaMath-CoT,      LR=5e-5
-#   5. Layer 12 only NuminaMath-CoT,     LR=5e-5
+#   1. Layer 0 only NuminaMath-CoT,      LR=1e-5
+#   2. Layer 3 only NuminaMath-CoT,      LR=1e-5
+#   3. Layer 6 only NuminaMath-CoT,      LR=1e-5
+#   4. Layer 9 only NuminaMath-CoT,      LR=1e-5
+#   5. Layer 12 only NuminaMath-CoT,     LR=5e-6
 #
 # All: batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072
 # Model: Qwen3-1.7B, 8 GPUs, saves only last-step checkpoint in HuggingFace format.
@@ -193,7 +193,7 @@ should_run() {
 # ========== Run Experiments ==========
 echo "============================================================"
 echo "  5 Experiments (Part 1): Single-Layer RL on NuminaMath-CoT"
-echo "  Layers: 0, 3, 6, 9, 12 | LR=5e-5 | epochs=2"
+echo "  Layers: 0,3,6,9 (1e-5), 12 (5e-6) | epochs=2"
 echo "  Model: $MODEL | GPUs: $GPUS ($NGPUS)"
 echo "  Data: $DATA_DIR"
 echo "  Checkpoint root: $CKPT_ROOT"
@@ -201,60 +201,60 @@ echo "============================================================"
 echo ""
 
 # --- Exp 1: Layer 0 ---
-EXP1_NAME="${DATE}_exp1_layer0_numina_cot_lr5e-5"
+EXP1_NAME="${DATE}_exp1_layer0_numina_cot_lr1e-5"
 if should_run 1; then
     echo "=========================================="
-    echo "  [1/5] Layer 0 NuminaMath-CoT, LR=5e-5"
+    echo "  [1/5] Layer 0 NuminaMath-CoT, LR=1e-5"
     echo "=========================================="
-    run_train "$EXP1_NAME" "$DATA_DIR" "5e-5" \
+    run_train "$EXP1_NAME" "$DATA_DIR" "1e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=0"
     echo "  [1/5] Done."
     echo ""
 fi
 
 # --- Exp 2: Layer 3 ---
-EXP2_NAME="${DATE}_exp2_layer3_numina_cot_lr5e-5"
+EXP2_NAME="${DATE}_exp2_layer3_numina_cot_lr1e-5"
 if should_run 2; then
     echo "=========================================="
-    echo "  [2/5] Layer 3 NuminaMath-CoT, LR=5e-5"
+    echo "  [2/5] Layer 3 NuminaMath-CoT, LR=1e-5"
     echo "=========================================="
-    run_train "$EXP2_NAME" "$DATA_DIR" "5e-5" \
+    run_train "$EXP2_NAME" "$DATA_DIR" "1e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=3"
     echo "  [2/5] Done."
     echo ""
 fi
 
 # --- Exp 3: Layer 6 ---
-EXP3_NAME="${DATE}_exp3_layer6_numina_cot_lr5e-5"
+EXP3_NAME="${DATE}_exp3_layer6_numina_cot_lr1e-5"
 if should_run 3; then
     echo "=========================================="
-    echo "  [3/5] Layer 6 NuminaMath-CoT, LR=5e-5"
+    echo "  [3/5] Layer 6 NuminaMath-CoT, LR=1e-5"
     echo "=========================================="
-    run_train "$EXP3_NAME" "$DATA_DIR" "5e-5" \
+    run_train "$EXP3_NAME" "$DATA_DIR" "1e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=6"
     echo "  [3/5] Done."
     echo ""
 fi
 
 # --- Exp 4: Layer 9 ---
-EXP4_NAME="${DATE}_exp4_layer9_numina_cot_lr5e-5"
+EXP4_NAME="${DATE}_exp4_layer9_numina_cot_lr1e-5"
 if should_run 4; then
     echo "=========================================="
-    echo "  [4/5] Layer 9 NuminaMath-CoT, LR=5e-5"
+    echo "  [4/5] Layer 9 NuminaMath-CoT, LR=1e-5"
     echo "=========================================="
-    run_train "$EXP4_NAME" "$DATA_DIR" "5e-5" \
+    run_train "$EXP4_NAME" "$DATA_DIR" "1e-5" \
         "+actor_rollout_ref.actor.train_layer_ids=9"
     echo "  [4/5] Done."
     echo ""
 fi
 
 # --- Exp 5: Layer 12 ---
-EXP5_NAME="${DATE}_exp5_layer12_numina_cot_lr5e-5"
+EXP5_NAME="${DATE}_exp5_layer12_numina_cot_lr5e-6"
 if should_run 5; then
     echo "=========================================="
-    echo "  [5/5] Layer 12 NuminaMath-CoT, LR=5e-5"
+    echo "  [5/5] Layer 12 NuminaMath-CoT, LR=5e-6"
     echo "=========================================="
-    run_train "$EXP5_NAME" "$DATA_DIR" "5e-5" \
+    run_train "$EXP5_NAME" "$DATA_DIR" "5e-6" \
         "+actor_rollout_ref.actor.train_layer_ids=12"
     echo "  [5/5] Done."
     echo ""
