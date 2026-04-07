@@ -31,7 +31,7 @@
 #   bash run_numina_base_part2_tmux.sh --only 1,3               # Run only 1 and 3
 #   bash run_numina_base_part2_tmux.sh --no-tmux                # Skip tmux auto-launch
 
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
@@ -191,7 +191,7 @@ print(n // $BATCH_SIZE)
         trainer.test_freq=5 \
         trainer.total_epochs=$EPOCHS \
         $FREEZE_ARGS \
-        "${EXTRA_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee "$LOG_FILE"
 }
 
 should_run() {
