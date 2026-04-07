@@ -1,21 +1,31 @@
 #!/bin/bash
 # ==============================================================================
-# 6 Experiments (Part 2): Qwen3-1.7B-Base Layer 12-27 on NuminaMath-CoT (with tmux)
+# 15 Experiments (Part 2): Qwen3-1.7B-Base Layers 12-27 on NuminaMath-CoT (with tmux)
 # ==============================================================================
 #
-# Experiments:
-#   1. Layer 12 Qwen3-1.7B-Base,     LR=5e-6
-#   2. Layer 15 Qwen3-1.7B-Base,     LR=5e-6
-#   3. Layer 18 Qwen3-1.7B-Base,     LR=1e-5
-#   4. Layer 21 Qwen3-1.7B-Base,     LR=1e-5
-#   5. Layer 24 Qwen3-1.7B-Base,     LR=1e-5
-#   6. Layer 27 Qwen3-1.7B-Base,     LR=1e-5
+# Experiments (priority layers first, then fill remaining):
+#   1.  Layer 12 Qwen3-1.7B-Base,     LR=5e-6
+#   2.  Layer 15 Qwen3-1.7B-Base,     LR=5e-6
+#   3.  Layer 18 Qwen3-1.7B-Base,     LR=5e-6
+#   4.  Layer 21 Qwen3-1.7B-Base,     LR=5e-6
+#   5.  Layer 24 Qwen3-1.7B-Base,     LR=5e-6
+#   6.  Layer 27 Qwen3-1.7B-Base,     LR=5e-6
+#   --- remaining layers to keep node busy ---
+#   7.  Layer 14 Qwen3-1.7B-Base,     LR=5e-6
+#   8.  Layer 16 Qwen3-1.7B-Base,     LR=5e-6
+#   9.  Layer 17 Qwen3-1.7B-Base,     LR=5e-6
+#   10. Layer 19 Qwen3-1.7B-Base,     LR=5e-6
+#   11. Layer 20 Qwen3-1.7B-Base,     LR=5e-6
+#   12. Layer 22 Qwen3-1.7B-Base,     LR=5e-6
+#   13. Layer 23 Qwen3-1.7B-Base,     LR=5e-6
+#   14. Layer 25 Qwen3-1.7B-Base,     LR=5e-6
+#   15. Layer 26 Qwen3-1.7B-Base,     LR=5e-6
 #
 # All: batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072
 # 8 GPUs, saves only last-step checkpoint in HuggingFace format.
 #
 # Usage:
-#   bash run_numina_base_part2_tmux.sh                          # Run all 6
+#   bash run_numina_base_part2_tmux.sh                          # Run all 15
 #   bash run_numina_base_part2_tmux.sh --gpus 0,1,2,3,4,5,6,7  # Use specific GPUs
 #   bash run_numina_base_part2_tmux.sh --skip 2                 # Skip first 2
 #   bash run_numina_base_part2_tmux.sh --only 1,3               # Run only 1 and 3
@@ -192,87 +202,35 @@ should_run() {
     [[ $exp_num -gt $SKIP ]] && return 0 || return 1
 }
 
+# Priority layers first, then remaining layers
+LAYERS=(12 15 18 21 24 27 14 16 17 19 20 22 23 25 26)
+TOTAL=${#LAYERS[@]}
+
 # ========== Run Experiments ==========
 echo "============================================================"
-echo "  6 Experiments (Part 2): Qwen3-1.7B-Base Layers 12-27"
-echo "  Layers: 12,15 (5e-6), 18,21,24,27 (1e-5) | epochs=2"
+echo "  $TOTAL Experiments (Part 2): Qwen3-1.7B-Base Layers 12-27"
+echo "  Priority: 12,15,18,21,24,27 then 14,16,17,19,20,22,23,25,26"
+echo "  All layers LR=5e-6 | epochs=2"
 echo "  Model: $MODEL | GPUs: $GPUS ($NGPUS)"
 echo "  Data: $DATA_DIR"
 echo "  Checkpoint root: $CKPT_ROOT"
 echo "============================================================"
 echo ""
 
-# --- Exp 1: Layer 12, LR=5e-6 ---
-EXP1_NAME="${DATE}_exp1_layer12_Qwen3-1.7B-Base_numina_cot_lr5e-6"
-if should_run 1; then
-    echo "=========================================="
-    echo "  [1/6] Layer 12 Qwen3-1.7B-Base, LR=5e-6"
-    echo "=========================================="
-    run_train "$EXP1_NAME" "$DATA_DIR" "5e-6" \
-        "+actor_rollout_ref.actor.train_layer_ids=12"
-    echo "  [1/6] Done."
-    echo ""
-fi
-
-# --- Exp 2: Layer 15, LR=5e-6 ---
-EXP2_NAME="${DATE}_exp2_layer15_Qwen3-1.7B-Base_numina_cot_lr5e-6"
-if should_run 2; then
-    echo "=========================================="
-    echo "  [2/6] Layer 15 Qwen3-1.7B-Base, LR=5e-6"
-    echo "=========================================="
-    run_train "$EXP2_NAME" "$DATA_DIR" "5e-6" \
-        "+actor_rollout_ref.actor.train_layer_ids=15"
-    echo "  [2/6] Done."
-    echo ""
-fi
-
-# --- Exp 3: Layer 18, LR=1e-5 ---
-EXP3_NAME="${DATE}_exp3_layer18_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 3; then
-    echo "=========================================="
-    echo "  [3/6] Layer 18 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP3_NAME" "$DATA_DIR" "1e-5" \
-        "+actor_rollout_ref.actor.train_layer_ids=18"
-    echo "  [3/6] Done."
-    echo ""
-fi
-
-# --- Exp 4: Layer 21, LR=1e-5 ---
-EXP4_NAME="${DATE}_exp4_layer21_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 4; then
-    echo "=========================================="
-    echo "  [4/6] Layer 21 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP4_NAME" "$DATA_DIR" "1e-5" \
-        "+actor_rollout_ref.actor.train_layer_ids=21"
-    echo "  [4/6] Done."
-    echo ""
-fi
-
-# --- Exp 5: Layer 24, LR=1e-5 ---
-EXP5_NAME="${DATE}_exp5_layer24_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 5; then
-    echo "=========================================="
-    echo "  [5/6] Layer 24 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP5_NAME" "$DATA_DIR" "1e-5" \
-        "+actor_rollout_ref.actor.train_layer_ids=24"
-    echo "  [5/6] Done."
-    echo ""
-fi
-
-# --- Exp 6: Layer 27, LR=1e-5 ---
-EXP6_NAME="${DATE}_exp6_layer27_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 6; then
-    echo "=========================================="
-    echo "  [6/6] Layer 27 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP6_NAME" "$DATA_DIR" "1e-5" \
-        "+actor_rollout_ref.actor.train_layer_ids=27"
-    echo "  [6/6] Done."
-    echo ""
-fi
+for i in "${!LAYERS[@]}"; do
+    LAYER=${LAYERS[$i]}
+    EXP_NUM=$((i + 1))
+    EXP_NAME="${DATE}_exp${EXP_NUM}_layer${LAYER}_Qwen3-1.7B-Base_numina_cot_lr5e-6"
+    if should_run $EXP_NUM; then
+        echo "=========================================="
+        echo "  [$EXP_NUM/$TOTAL] Layer $LAYER Qwen3-1.7B-Base, LR=5e-6"
+        echo "=========================================="
+        run_train "$EXP_NAME" "$DATA_DIR" "5e-6" \
+            "+actor_rollout_ref.actor.train_layer_ids=$LAYER"
+        echo "  [$EXP_NUM/$TOTAL] Done."
+        echo ""
+    fi
+done
 
 echo ""
 echo "============================================================"

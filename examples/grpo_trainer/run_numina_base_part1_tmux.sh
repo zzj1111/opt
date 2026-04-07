@@ -1,21 +1,31 @@
 #!/bin/bash
 # ==============================================================================
-# 6 Experiments (Part 1): Full RL + Layer 0/3/6/9 on NuminaMath-CoT (with tmux)
+# 15 Experiments (Part 1): Full RL + All Layers 0-13 on NuminaMath-CoT (with tmux)
 # ==============================================================================
 #
-# Experiments:
-#   1. Full RL Qwen3-1.7B,              LR=1e-6
-#   2. Full RL Qwen3-1.7B-Base,         LR=1e-6
-#   3. Layer 0 Qwen3-1.7B-Base,         LR=1e-5
-#   4. Layer 3 Qwen3-1.7B-Base,         LR=1e-5
-#   5. Layer 6 Qwen3-1.7B-Base,         LR=1e-5
-#   6. Layer 9 Qwen3-1.7B-Base,         LR=1e-5
+# Experiments (priority layers first, then fill remaining):
+#   1.  Full RL Qwen3-1.7B,              LR=1e-6
+#   2.  Full RL Qwen3-1.7B-Base,         LR=1e-6
+#   3.  Layer 0  Qwen3-1.7B-Base,        LR=5e-6
+#   4.  Layer 3  Qwen3-1.7B-Base,        LR=5e-6
+#   5.  Layer 6  Qwen3-1.7B-Base,        LR=5e-6
+#   6.  Layer 9  Qwen3-1.7B-Base,        LR=5e-6
+#   --- remaining layers to keep node busy ---
+#   7.  Layer 1  Qwen3-1.7B-Base,        LR=5e-6
+#   8.  Layer 2  Qwen3-1.7B-Base,        LR=5e-6
+#   9.  Layer 4  Qwen3-1.7B-Base,        LR=5e-6
+#   10. Layer 5  Qwen3-1.7B-Base,        LR=5e-6
+#   11. Layer 7  Qwen3-1.7B-Base,        LR=5e-6
+#   12. Layer 8  Qwen3-1.7B-Base,        LR=5e-6
+#   13. Layer 10 Qwen3-1.7B-Base,        LR=5e-6
+#   14. Layer 11 Qwen3-1.7B-Base,        LR=5e-6
+#   15. Layer 13 Qwen3-1.7B-Base,        LR=5e-6
 #
 # All: batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072
 # 8 GPUs, saves only last-step checkpoint in HuggingFace format.
 #
 # Usage:
-#   bash run_numina_base_part1_tmux.sh                          # Run all 6
+#   bash run_numina_base_part1_tmux.sh                          # Run all 15
 #   bash run_numina_base_part1_tmux.sh --gpus 0,1,2,3,4,5,6,7  # Use specific GPUs
 #   bash run_numina_base_part1_tmux.sh --skip 2                 # Skip first 2
 #   bash run_numina_base_part1_tmux.sh --only 1,3               # Run only 1 and 3
@@ -190,85 +200,60 @@ should_run() {
     [[ $exp_num -gt $SKIP ]] && return 0 || return 1
 }
 
+TOTAL=15
+
 # ========== Run Experiments ==========
 echo "============================================================"
-echo "  6 Experiments (Part 1): Full RL + Layers 0,3,6,9"
-echo "  Models: Qwen3-1.7B, Qwen3-1.7B-Base"
+echo "  $TOTAL Experiments (Part 1)"
+echo "  Full RL + Layers 0,3,6,9 (priority) + Layers 1,2,4,5,7,8,10,11,13"
+echo "  All layers LR=5e-6 | epochs=2"
 echo "  Data: $DATA_DIR"
-echo "  GPUs: $GPUS ($NGPUS) | epochs=2"
+echo "  GPUs: $GPUS ($NGPUS)"
 echo "  Checkpoint root: $CKPT_ROOT"
 echo "============================================================"
 echo ""
 
 # --- Exp 1: Full RL Qwen3-1.7B, LR=1e-6 ---
-EXP1_NAME="${DATE}_exp1_full_Qwen3-1.7B_numina_cot_lr1e-6"
-if should_run 1; then
+EXP_NUM=1
+EXP_NAME="${DATE}_exp${EXP_NUM}_full_Qwen3-1.7B_numina_cot_lr1e-6"
+if should_run $EXP_NUM; then
     echo "=========================================="
-    echo "  [1/6] Full RL Qwen3-1.7B, LR=1e-6"
+    echo "  [$EXP_NUM/$TOTAL] Full RL Qwen3-1.7B, LR=1e-6"
     echo "=========================================="
-    run_train "$EXP1_NAME" "$DATA_DIR" "1e-6" "Qwen/Qwen3-1.7B" ""
-    echo "  [1/6] Done."
+    run_train "$EXP_NAME" "$DATA_DIR" "1e-6" "Qwen/Qwen3-1.7B" ""
+    echo "  [$EXP_NUM/$TOTAL] Done."
     echo ""
 fi
 
 # --- Exp 2: Full RL Qwen3-1.7B-Base, LR=1e-6 ---
-EXP2_NAME="${DATE}_exp2_full_Qwen3-1.7B-Base_numina_cot_lr1e-6"
-if should_run 2; then
+EXP_NUM=2
+EXP_NAME="${DATE}_exp${EXP_NUM}_full_Qwen3-1.7B-Base_numina_cot_lr1e-6"
+if should_run $EXP_NUM; then
     echo "=========================================="
-    echo "  [2/6] Full RL Qwen3-1.7B-Base, LR=1e-6"
+    echo "  [$EXP_NUM/$TOTAL] Full RL Qwen3-1.7B-Base, LR=1e-6"
     echo "=========================================="
-    run_train "$EXP2_NAME" "$DATA_DIR" "1e-6" "Qwen/Qwen3-1.7B-Base" ""
-    echo "  [2/6] Done."
+    run_train "$EXP_NAME" "$DATA_DIR" "1e-6" "Qwen/Qwen3-1.7B-Base" ""
+    echo "  [$EXP_NUM/$TOTAL] Done."
     echo ""
 fi
 
-# --- Exp 3: Layer 0, Qwen3-1.7B-Base, LR=1e-5 ---
-EXP3_NAME="${DATE}_exp3_layer0_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 3; then
-    echo "=========================================="
-    echo "  [3/6] Layer 0 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP3_NAME" "$DATA_DIR" "1e-5" "Qwen/Qwen3-1.7B-Base" \
-        "+actor_rollout_ref.actor.train_layer_ids=0"
-    echo "  [3/6] Done."
-    echo ""
-fi
-
-# --- Exp 4: Layer 3, Qwen3-1.7B-Base, LR=1e-5 ---
-EXP4_NAME="${DATE}_exp4_layer3_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 4; then
-    echo "=========================================="
-    echo "  [4/6] Layer 3 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP4_NAME" "$DATA_DIR" "1e-5" "Qwen/Qwen3-1.7B-Base" \
-        "+actor_rollout_ref.actor.train_layer_ids=3"
-    echo "  [4/6] Done."
-    echo ""
-fi
-
-# --- Exp 5: Layer 6, Qwen3-1.7B-Base, LR=1e-5 ---
-EXP5_NAME="${DATE}_exp5_layer6_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 5; then
-    echo "=========================================="
-    echo "  [5/6] Layer 6 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP5_NAME" "$DATA_DIR" "1e-5" "Qwen/Qwen3-1.7B-Base" \
-        "+actor_rollout_ref.actor.train_layer_ids=6"
-    echo "  [5/6] Done."
-    echo ""
-fi
-
-# --- Exp 6: Layer 9, Qwen3-1.7B-Base, LR=1e-5 ---
-EXP6_NAME="${DATE}_exp6_layer9_Qwen3-1.7B-Base_numina_cot_lr1e-5"
-if should_run 6; then
-    echo "=========================================="
-    echo "  [6/6] Layer 9 Qwen3-1.7B-Base, LR=1e-5"
-    echo "=========================================="
-    run_train "$EXP6_NAME" "$DATA_DIR" "1e-5" "Qwen/Qwen3-1.7B-Base" \
-        "+actor_rollout_ref.actor.train_layer_ids=9"
-    echo "  [6/6] Done."
-    echo ""
-fi
+# --- Priority layers first: 0, 3, 6, 9 ---
+# --- Then remaining layers: 1, 2, 4, 5, 7, 8, 10, 11, 13 ---
+LAYERS=(0 3 6 9 1 2 4 5 7 8 10 11 13)
+for i in "${!LAYERS[@]}"; do
+    LAYER=${LAYERS[$i]}
+    EXP_NUM=$((i + 3))
+    EXP_NAME="${DATE}_exp${EXP_NUM}_layer${LAYER}_Qwen3-1.7B-Base_numina_cot_lr5e-6"
+    if should_run $EXP_NUM; then
+        echo "=========================================="
+        echo "  [$EXP_NUM/$TOTAL] Layer $LAYER Qwen3-1.7B-Base, LR=5e-6"
+        echo "=========================================="
+        run_train "$EXP_NAME" "$DATA_DIR" "5e-6" "Qwen/Qwen3-1.7B-Base" \
+            "+actor_rollout_ref.actor.train_layer_ids=$LAYER"
+        echo "  [$EXP_NUM/$TOTAL] Done."
+        echo ""
+    fi
+done
 
 echo ""
 echo "============================================================"
