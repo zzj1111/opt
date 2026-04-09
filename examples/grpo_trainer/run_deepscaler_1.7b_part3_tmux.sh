@@ -142,4 +142,3 @@ should_run 7 && \
     echo "  [7/$TOTAL] Done." && echo ""
 
 echo ""; echo "  Part 3/4 complete!"
-DUMMY_RUN_NAME="dummy_dsr_p3_$(hostname)_$(date +%m%d_%H%M)" python3 "$SCRIPT_DIR/dummy_gpu_hold.py"
