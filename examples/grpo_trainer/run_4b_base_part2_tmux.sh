@@ -1,8 +1,16 @@
 #!/bin/bash
 # ==============================================================================
-# Part 2/4: Qwen3-4B-Base Layers 9-17 on NuminaMath-CoT
+# Part 2/2: Qwen3-4B-Base Layers 18-35 on NuminaMath-CoT
 # ==============================================================================
-# 9 experiments, all LR=5e-6, epochs=2, 8 GPUs
+#
+# Experiments (18 total): Layer 18-35, all LR=5e-6
+#
+# batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072, 8 GPUs
+#
+# Usage:
+#   bash run_4b_base_part2_tmux.sh
+#   bash run_4b_base_part2_tmux.sh --skip 3
+#   bash run_4b_base_part2_tmux.sh --no-tmux
 
 set -uo pipefail
 
@@ -101,19 +109,18 @@ should_run() {
     if [[ -n "$ONLY" ]]; then echo "$ONLY" | tr ',' '\n' | grep -qx "$n"; else [[ $n -gt $SKIP ]]; fi
 }
 
-LAYERS=(9 10 11 12 13 14 15 16 17)
-TOTAL=${#LAYERS[@]}
+TOTAL=18
 echo "============================================================"
-echo "  Part 2/4: $MODEL_SHORT — Layers 9-17 ($TOTAL exp)"
+echo "  Part 2/2: $MODEL_SHORT — Layers 18-35 ($TOTAL exp)"
 echo "  Data: $DATA_DIR | GPUs: $GPUS ($NGPUS) | epochs=2"
 echo "============================================================"
 
-for i in "${!LAYERS[@]}"; do
-    LAYER=${LAYERS[$i]}; EXP_NUM=$((i + 1))
+for LAYER in $(seq 18 35); do
+    EXP_NUM=$((LAYER - 17))
     should_run $EXP_NUM && \
         run_train "${DATE}_exp${EXP_NUM}_layer${LAYER}_${MODEL_SHORT}_numina_cot_lr5e-6" "$DATA_DIR" "5e-6" "+actor_rollout_ref.actor.train_layer_ids=$LAYER" && \
         echo "  [$EXP_NUM/$TOTAL] Done." && echo ""
 done
 
-echo ""; echo "  Part 2/4 complete!"
+echo ""; echo "  Part 2/2 complete!"
 DUMMY_RUN_NAME="dummy_4b_p2_$(hostname)_$(date +%m%d_%H%M)" python3 "$SCRIPT_DIR/dummy_gpu_hold.py"
