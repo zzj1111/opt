@@ -1,0 +1,17 @@
+{
+  "data_source": "math",
+  "prompt": [
+    {
+      "role": "user",
+      "content": "Find the probability that a monkey typing randomly on a typewriter will type the string 'abc' before 'aaa'. Let's think step by step and output the final answer within \\boxed{}."
+    }
+  ],
+  "ability": "math",
+  "reward_model": {
+    "style": "rule",
+    "ground_truth": "\\frac{3}{7}"
+  },
+  "extra_info": {
+    "solution": "It suffices to assume that the monkey starts all over as soon as he has typed a string that ends in no prefix of either $abc$ or $aaa$. For instance, if the monkey gets to $abb$ we can throw these out because there's no way to finish one of those strings from this without starting all over. Now, we draw the tree of all possible intermediate stages under this assumption; there are not many possibilities. The paths from the root 'a' are: a- aa- aaa a- aa- aab- aabc a- ab- abc The first and last possibilities have probability $1 / 27$ each and the middle one has probability $1 / 81$, so in total the probability of getting the first before the second or the third is $\\frac{1 / 27}{1 / 27+1 / 81+1 / 27}=\\frac{3}{7}$."
+  }
+}
