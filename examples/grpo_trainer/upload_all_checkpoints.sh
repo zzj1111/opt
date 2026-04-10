@@ -16,7 +16,7 @@
 CKPT_ROOT="/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints"
 HF_TOKEN="${HF_TOKEN:-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}"
 HF_REPO="mhong-university-of-minnesota/opt-checkpoints"
-PREFIX=""
+PREFIX="04"
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
