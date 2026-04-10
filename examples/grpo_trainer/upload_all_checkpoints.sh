@@ -15,7 +15,7 @@
 
 CKPT_ROOT="/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints"
 HF_TOKEN="${HF_TOKEN:-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}"
-HF_REPO="mhong-university-of-minnesota/opt-checkpoints"
+HF_REPO=""
 PREFIX="04"
 DRY_RUN=false
 
@@ -58,6 +58,14 @@ hf_token = sys.argv[2]
 hf_repo = sys.argv[3]
 prefix = sys.argv[4]
 dry_run = sys.argv[5] == "true"
+
+# Auto-detect repo: {username}/opt-checkpoints
+if not hf_repo:
+    from huggingface_hub import HfApi
+    api = HfApi(token=hf_token)
+    user = api.whoami()["name"]
+    hf_repo = f"{user}/opt-checkpoints"
+    print(f"Auto-detected repo: {hf_repo}\n")
 
 def find_last_hf_ckpt(exp_dir):
     candidates = []
