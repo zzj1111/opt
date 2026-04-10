@@ -14,7 +14,7 @@
 #   bash upload_all_checkpoints.sh --prefix "0409_" --dry-run
 
 CKPT_ROOT="/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints"
-HF_TOKEN="${HF_TOKEN:-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}"
+HF_TOKEN="${HF_TOKEN:-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}"
 HF_REPO="mhong-university-of-minnesota/opt-checkpoints"
 PREFIX="04"
 DRY_RUN=false
