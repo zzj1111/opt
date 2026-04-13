@@ -101,6 +101,29 @@ mkdir -p "$LOG_DIR"
 
 PYTHON="${PYTHON:-python3}"
 
+# ========== Resolve model path ==========
+# Checkpoint structure: CKPT_ROOT/04xxx_exp_name/global_step_NNN/
+# Pick the largest global_step_* directory under each 04* experiment.
+resolve_model_path() {
+    local exp_dir="$1"
+    local best_step=""
+    local best_num=-1
+    for step_dir in "$exp_dir"/global_step_*; do
+        [[ -d "$step_dir" ]] || continue
+        local num="${step_dir##*global_step_}"
+        if [[ "$num" =~ ^[0-9]+$ ]] && (( num > best_num )); then
+            best_num=$num
+            best_step="$step_dir"
+        fi
+    done
+    if [[ -n "$best_step" ]]; then
+        echo "$best_step"
+    else
+        # No global_step_* subdirs — treat exp_dir itself as the model path
+        echo "$exp_dir"
+    fi
+}
+
 # ========== Collect models ==========
 if [[ ! -d "$CKPT_ROOT" ]]; then
     echo "ERROR: Checkpoint root not found: $CKPT_ROOT"
@@ -108,8 +131,12 @@ if [[ ! -d "$CKPT_ROOT" ]]; then
 fi
 
 MODELS=()
+MODEL_NAMES=()
 for d in "$CKPT_ROOT"/04*; do
-    [[ -d "$d" ]] && MODELS+=("$d")
+    [[ -d "$d" ]] || continue
+    model_path=$(resolve_model_path "$d")
+    MODELS+=("$model_path")
+    MODEL_NAMES+=("$(basename "$d")")
 done
 
 TOTAL=${#MODELS[@]}
@@ -137,9 +164,10 @@ echo ""
 
 if $DRY_RUN; then
     echo "[DRY RUN] Would evaluate:"
-    for m in "${MODELS[@]}"; do
+    for i in "${!MODELS[@]}"; do
         for mt in $MAX_TOKENS_LIST; do
-            echo "  $(basename "$m")  max_tokens=$mt"
+            local_tag="$mt"; [[ "$mt" == "3072" ]] && local_tag="3k"; [[ "$mt" == "8192" ]] && local_tag="8k"
+            echo "  ${MODEL_NAMES[$i]}  ->  ${MODELS[$i]}  (max_tokens=$local_tag)"
         done
     done
     echo ""
@@ -152,17 +180,16 @@ run_model() {
     local model_path="$1"
     local gpu_id="$2"
     local max_tokens="$3"
-    local model_name
-    model_name=$(basename "$model_path")
+    local exp_name="$4"   # experiment name (04xxx_exp_name), NOT global_step_*
 
     # Tag: 3k or 8k
     local tok_tag="${max_tokens}"
     [[ "$max_tokens" == "3072" ]] && tok_tag="3k"
     [[ "$max_tokens" == "8192" ]] && tok_tag="8k"
 
-    local output_dir="$RESULTS_BASE/${model_name}_${tok_tag}"
-    local log_file="$LOG_DIR/${model_name}_${tok_tag}.log"
-    local run_label="${model_name}_${tok_tag}"
+    local output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}"
+    local log_file="$LOG_DIR/${exp_name}_${tok_tag}.log"
+    local run_label="${exp_name}_${tok_tag}"
 
     # Skip if already completed
     if [[ -f "$output_dir/overall_summary.json" ]]; then
@@ -194,12 +221,14 @@ run_model() {
     return $?
 }
 
-# ========== Build run queue: (model, max_tokens) pairs ==========
+# ========== Build run queue: (model_path, exp_name, max_tokens) triples ==========
 RUN_MODELS=()
+RUN_NAMES=()
 RUN_TOKENS=()
-for m in "${MODELS[@]}"; do
+for i in "${!MODELS[@]}"; do
     for mt in $MAX_TOKENS_LIST; do
-        RUN_MODELS+=("$m")
+        RUN_MODELS+=("${MODELS[$i]}")
+        RUN_NAMES+=("${MODEL_NAMES[$i]}")
         RUN_TOKENS+=("$mt")
     done
 done
@@ -221,20 +250,23 @@ for ((i=0; i<TOTAL_RUNS; i+=NUM_GPUS)); do
     for ((j=0; j<batch_size; j++)); do
         run_idx=$((i + j))
         gpu_id=$(echo "$GPUS" | cut -d',' -f$((j+1)))
-        run_model "${RUN_MODELS[$run_idx]}" "$gpu_id" "${RUN_TOKENS[$run_idx]}" &
+        run_model "${RUN_MODELS[$run_idx]}" "$gpu_id" "${RUN_TOKENS[$run_idx]}" "${RUN_NAMES[$run_idx]}" &
         PIDS+=($!)
     done
 
     # Wait for batch
     for pid_idx in "${!PIDS[@]}"; do
         run_idx=$((i + pid_idx))
-        local_name="$(basename "${RUN_MODELS[$run_idx]}")_${RUN_TOKENS[$pid_idx]}"
+        tok_tag="${RUN_TOKENS[$run_idx]}"
+        [[ "$tok_tag" == "3072" ]] && tok_tag="3k"
+        [[ "$tok_tag" == "8192" ]] && tok_tag="8k"
+        local_name="${RUN_NAMES[$run_idx]}_${tok_tag}"
         if wait "${PIDS[$pid_idx]}"; then
             COMPLETED=$((COMPLETED + 1))
             echo "  [DONE] $local_name ($COMPLETED/$TOTAL_RUNS)"
         else
             FAILED_RUNS+=("$local_name")
-            echo "  [FAIL] $local_name — check logs"
+            echo "  [FAIL] $local_name — check $LOG_DIR/${local_name}.log"
         fi
     done
 done
