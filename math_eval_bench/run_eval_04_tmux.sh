@@ -1,10 +1,13 @@
 #!/bin/bash
 # ==============================================================================
-# One-click evaluation of all 04* checkpoints
+# One-click evaluation of all 04* checkpoints (Worker Mode)
 # ==============================================================================
 #
 # Evaluates all models under CKPT_ROOT that start with "04" on 15 benchmarks.
 # AMC/AIME use average@32. Results logged to WandB.
+#
+# Worker mode: each GPU independently pulls tasks from a shared queue.
+# No GPU ever sits idle waiting for another.
 #
 # Auto-launches tmux session and activates conda environment.
 #
@@ -14,7 +17,7 @@
 #   bash run_eval_04_tmux.sh --gpus 0,1,2,3        # Use specific GPUs
 #   bash run_eval_04_tmux.sh --ckpt-root /path     # Override checkpoint dir
 #   bash run_eval_04_tmux.sh --no-tmux             # Skip tmux auto-launch
-#   bash run_eval_04_tmux.sh --only amc,aime2024   # Run only specific benchmarks
+#   bash run_eval_04_tmux.sh --max-tokens "3072"   # Only 3k (default: "3072 8192")
 
 set -uo pipefail
 
@@ -42,7 +45,7 @@ BENCHMARKS="math500 gsm8k mbpp humaneval arc_challenge mmlu_pro bbh mgsm ceval a
 TEMPERATURE=0.6
 TOP_P=0.95
 TOP_K=20
-MAX_TOKENS_LIST="3072 8192"   # Run each model at both 3k and 8k
+MAX_TOKENS_LIST="3072 8192"
 SEED=42
 
 # average@N for competition benchmarks
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --benchmarks)      BENCHMARKS="$2"; shift 2 ;;
         --wandb-project)   WANDB_PROJECT="$2"; shift 2 ;;
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
+        --max-tokens)      MAX_TOKENS_LIST="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -75,6 +79,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --ckpt-root $(printf '%q' "$CKPT_ROOT")"
     FULL_ARGS="$FULL_ARGS --wandb-project $(printf '%q' "$WANDB_PROJECT")"
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
+    FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
     $DRY_RUN && FULL_ARGS="$FULL_ARGS --dry-run"
     [[ -n "$BENCHMARKS" ]] && FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
@@ -96,10 +101,13 @@ fi
 export WANDB_API_KEY
 export WANDB_ENTITY
 
-NUM_GPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
-mkdir -p "$LOG_DIR"
+IFS=',' read -ra GPU_LIST <<< "$GPUS"
+NUM_GPUS=${#GPU_LIST[@]}
 
 PYTHON="${PYTHON:-python3}"
+LOCK_DIR="$LOG_DIR/locks"
+QUEUE_FILE="$LOG_DIR/task_queue.txt"
+mkdir -p "$LOG_DIR" "$LOCK_DIR"
 
 # ========== Resolve model path ==========
 # Checkpoint structure: CKPT_ROOT/04xxx_exp_name/global_step_NNN/
@@ -119,173 +127,151 @@ resolve_model_path() {
     if [[ -n "$best_step" ]]; then
         echo "$best_step"
     else
-        # No global_step_* subdirs — treat exp_dir itself as the model path
         echo "$exp_dir"
     fi
 }
 
-# ========== Collect models ==========
+# ========== Build task queue (full models first) ==========
 if [[ ! -d "$CKPT_ROOT" ]]; then
     echo "ERROR: Checkpoint root not found: $CKPT_ROOT"
     exit 1
 fi
 
-MODELS=()
-MODEL_NAMES=()
+FULL_QUEUE=$(mktemp)
+LAYER_QUEUE=$(mktemp)
 for d in "$CKPT_ROOT"/04*; do
     [[ -d "$d" ]] || continue
+    exp_name=$(basename "$d")
     model_path=$(resolve_model_path "$d")
-    MODELS+=("$model_path")
-    MODEL_NAMES+=("$(basename "$d")")
+    for mt in $MAX_TOKENS_LIST; do
+        tok_tag="$mt"
+        [[ "$mt" == "3072" ]] && tok_tag="3k"
+        [[ "$mt" == "8192" ]] && tok_tag="8k"
+        output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}"
+        if [[ -f "$output_dir/overall_summary.json" ]]; then
+            continue
+        fi
+        line="$model_path|$exp_name|$mt|$tok_tag"
+        if [[ "$exp_name" == *full* ]]; then
+            echo "$line" >> "$FULL_QUEUE"
+        else
+            echo "$line" >> "$LAYER_QUEUE"
+        fi
+    done
 done
+cat "$FULL_QUEUE" "$LAYER_QUEUE" > "$QUEUE_FILE" 2>/dev/null
+rm -f "$FULL_QUEUE" "$LAYER_QUEUE"
 
-TOTAL=${#MODELS[@]}
-if [[ $TOTAL -eq 0 ]]; then
-    echo "ERROR: No 04* directories found in $CKPT_ROOT"
-    exit 1
-fi
-
-NUM_LENGTHS=$(echo $MAX_TOKENS_LIST | wc -w)
-TOTAL_RUNS=$((TOTAL * NUM_LENGTHS))
+TOTAL_TASKS=$(wc -l < "$QUEUE_FILE")
 
 echo "============================================================"
-echo "  Checkpoint Evaluation (04*)"
-echo "  Models:      $TOTAL"
-echo "  Max tokens:  $MAX_TOKENS_LIST ($NUM_LENGTHS configs per model)"
-echo "  Total runs:  $TOTAL_RUNS"
-echo "  Benchmarks:  $BENCHMARKS"
-echo "  Avg@N:       $AVG_AT_MAP"
-echo "  GPUs:        $NUM_GPUS (TP=1 per model)"
-echo "  Params:      T=$TEMPERATURE P=$TOP_P K=$TOP_K"
-echo "  WandB:       $WANDB_ENTITY / $WANDB_PROJECT"
-echo "  Results:     $RESULTS_BASE"
+echo "  Checkpoint Evaluation — Worker Mode (04*)"
+echo "  Pending tasks: $TOTAL_TASKS"
+echo "  Max tokens:    $MAX_TOKENS_LIST"
+echo "  Benchmarks:    $BENCHMARKS"
+echo "  Avg@N:         $AVG_AT_MAP"
+echo "  GPUs:          ${GPU_LIST[*]} ($NUM_GPUS workers, TP=1)"
+echo "  Params:        T=$TEMPERATURE P=$TOP_P K=$TOP_K"
+echo "  WandB:         $WANDB_ENTITY / $WANDB_PROJECT"
+echo "  Results:       $RESULTS_BASE"
 echo "============================================================"
 echo ""
 
 if $DRY_RUN; then
     echo "[DRY RUN] Would evaluate:"
-    for i in "${!MODELS[@]}"; do
-        for mt in $MAX_TOKENS_LIST; do
-            local_tag="$mt"; [[ "$mt" == "3072" ]] && local_tag="3k"; [[ "$mt" == "8192" ]] && local_tag="8k"
-            echo "  ${MODEL_NAMES[$i]}  ->  ${MODELS[$i]}  (max_tokens=$local_tag)"
-        done
-    done
+    while IFS='|' read -r path name mt tok; do
+        echo "  $name ($tok)  ->  $path"
+    done < "$QUEUE_FILE"
     echo ""
-    echo "Total: $TOTAL_RUNS runs ($TOTAL models x $NUM_LENGTHS token lengths)"
+    echo "Total: $TOTAL_TASKS tasks"
     exit 0
 fi
 
-# ========== Run function ==========
-run_model() {
-    local model_path="$1"
-    local gpu_id="$2"
-    local max_tokens="$3"
-    local exp_name="$4"   # experiment name (04xxx_exp_name), NOT global_step_*
+if [[ $TOTAL_TASKS -eq 0 ]]; then
+    echo "All tasks already completed!"
+    exit 0
+fi
 
-    # Tag: 3k or 8k
-    local tok_tag="${max_tokens}"
-    [[ "$max_tokens" == "3072" ]] && tok_tag="3k"
-    [[ "$max_tokens" == "8192" ]] && tok_tag="8k"
+# ========== Worker function ==========
+worker() {
+    local gpu_id="$1"
+    local completed=0
+    local failed=0
 
-    local output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}"
-    local log_file="$LOG_DIR/${exp_name}_${tok_tag}.log"
-    local run_label="${exp_name}_${tok_tag}"
+    while true; do
+        # Atomically grab next task from queue
+        local task=""
+        task=$( flock -x 200 bash -c '
+            t=$(head -1 "'"$QUEUE_FILE"'" 2>/dev/null)
+            if [ -n "$t" ]; then
+                sed -i "1d" "'"$QUEUE_FILE"'"
+            fi
+            echo "$t"
+        ' 200>"$LOCK_DIR/queue.lock" )
 
-    # Skip if already completed
-    if [[ -f "$output_dir/overall_summary.json" ]]; then
-        echo "  [SKIP] $run_label — already completed"
-        return 0
-    fi
+        [[ -z "$task" ]] && break
 
-    echo "  [GPU $gpu_id] $run_label"
+        IFS='|' read -r model_path exp_name max_tokens tok_tag <<< "$task"
+        local run_label="${exp_name}_${tok_tag}"
+        local output_dir="$RESULTS_BASE/${run_label}"
+        local log_file="$LOG_DIR/${run_label}.log"
 
-    CUDA_VISIBLE_DEVICES="$gpu_id" $PYTHON "$SCRIPT_DIR/eval.py" \
-        --backend vllm \
-        --model "$model_path" \
-        --benchmarks $BENCHMARKS \
-        --tensor-parallel-size 1 \
-        --dtype auto \
-        --gpu-memory-utilization 0.90 \
-        --max-tokens "$max_tokens" \
-        --temperature $TEMPERATURE \
-        --top-p $TOP_P \
-        --top-k $TOP_K \
-        --seed $SEED \
-        --avg-at-map "$AVG_AT_MAP" \
-        --wandb-project "$WANDB_PROJECT" \
-        --wandb-entity "$WANDB_ENTITY" \
-        --wandb-run-name "$run_label" \
-        --output-dir "$output_dir" \
-        > "$log_file" 2>&1
+        echo "[GPU $gpu_id] START $run_label"
 
-    return $?
-}
-
-# ========== Build run queue: (model_path, exp_name, max_tokens) triples ==========
-RUN_MODELS=()
-RUN_NAMES=()
-RUN_TOKENS=()
-for i in "${!MODELS[@]}"; do
-    for mt in $MAX_TOKENS_LIST; do
-        RUN_MODELS+=("${MODELS[$i]}")
-        RUN_NAMES+=("${MODEL_NAMES[$i]}")
-        RUN_TOKENS+=("$mt")
-    done
-done
-TOTAL_RUNS=${#RUN_MODELS[@]}
-
-# ========== Parallel execution ==========
-COMPLETED=0
-FAILED_RUNS=()
-
-for ((i=0; i<TOTAL_RUNS; i+=NUM_GPUS)); do
-    batch_end=$((i + NUM_GPUS))
-    [[ $batch_end -gt $TOTAL_RUNS ]] && batch_end=$TOTAL_RUNS
-    batch_size=$((batch_end - i))
-
-    echo ""
-    echo "--- Batch: runs $((i+1))-$batch_end / $TOTAL_RUNS ---"
-
-    PIDS=()
-    for ((j=0; j<batch_size; j++)); do
-        run_idx=$((i + j))
-        gpu_id=$(echo "$GPUS" | cut -d',' -f$((j+1)))
-        run_model "${RUN_MODELS[$run_idx]}" "$gpu_id" "${RUN_TOKENS[$run_idx]}" "${RUN_NAMES[$run_idx]}" &
-        PIDS+=($!)
-    done
-
-    # Wait for batch
-    for pid_idx in "${!PIDS[@]}"; do
-        run_idx=$((i + pid_idx))
-        tok_tag="${RUN_TOKENS[$run_idx]}"
-        [[ "$tok_tag" == "3072" ]] && tok_tag="3k"
-        [[ "$tok_tag" == "8192" ]] && tok_tag="8k"
-        local_name="${RUN_NAMES[$run_idx]}_${tok_tag}"
-        if wait "${PIDS[$pid_idx]}"; then
-            COMPLETED=$((COMPLETED + 1))
-            echo "  [DONE] $local_name ($COMPLETED/$TOTAL_RUNS)"
+        if CUDA_VISIBLE_DEVICES="$gpu_id" $PYTHON "$SCRIPT_DIR/eval.py" \
+            --backend vllm \
+            --model "$model_path" \
+            --benchmarks $BENCHMARKS \
+            --tensor-parallel-size 1 \
+            --dtype auto \
+            --gpu-memory-utilization 0.90 \
+            --max-tokens "$max_tokens" \
+            --temperature $TEMPERATURE \
+            --top-p $TOP_P \
+            --top-k $TOP_K \
+            --seed $SEED \
+            --avg-at-map "$AVG_AT_MAP" \
+            --wandb-project "$WANDB_PROJECT" \
+            --wandb-entity "$WANDB_ENTITY" \
+            --wandb-run-name "$run_label" \
+            --output-dir "$output_dir" \
+            > "$log_file" 2>&1; then
+            completed=$((completed + 1))
+            echo "[GPU $gpu_id] DONE  $run_label (worker total: $completed)"
         else
-            FAILED_RUNS+=("$local_name")
-            echo "  [FAIL] $local_name — check $LOG_DIR/${local_name}.log"
+            failed=$((failed + 1))
+            echo "[GPU $gpu_id] FAIL  $run_label — see $log_file"
         fi
     done
+
+    echo "[GPU $gpu_id] Worker finished. Completed: $completed, Failed: $failed"
+}
+
+# ========== Launch workers ==========
+WORKER_PIDS=()
+for gpu_id in "${GPU_LIST[@]}"; do
+    worker "$gpu_id" &
+    WORKER_PIDS+=($!)
+    echo "Worker launched on GPU $gpu_id (PID $!)"
+done
+
+# Wait for all workers
+for pid in "${WORKER_PIDS[@]}"; do
+    wait "$pid" || true
 done
 
 echo ""
 echo "============================================================"
-echo "  Evaluation Complete"
-echo "  Succeeded: $COMPLETED / $TOTAL_RUNS"
-if [[ ${#FAILED_RUNS[@]} -gt 0 ]]; then
-    echo "  Failed: ${FAILED_RUNS[*]}"
-fi
+echo "  All workers finished."
 echo "  Results:  $RESULTS_BASE"
 echo "  WandB:    https://wandb.ai/$WANDB_ENTITY/$WANDB_PROJECT"
 echo "============================================================"
 
 # Generate comparison CSV
-if [[ $COMPLETED -ge 2 ]]; then
+COMPLETED_COUNT=$(ls "$RESULTS_BASE"/04*/overall_summary.json 2>/dev/null | wc -l)
+if [[ $COMPLETED_COUNT -ge 2 ]]; then
     echo ""
-    echo "Generating comparison table..."
+    echo "Generating comparison table ($COMPLETED_COUNT results)..."
     $PYTHON "$SCRIPT_DIR/compare_results.py" "$RESULTS_BASE/" --format csv \
         > "$RESULTS_BASE/summary_04_eval.csv" 2>/dev/null || true
     echo "  Saved to: $RESULTS_BASE/summary_04_eval.csv"

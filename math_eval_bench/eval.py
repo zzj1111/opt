@@ -431,7 +431,9 @@ def main():
     print(f"  {'Benchmark':<20} {'Accuracy':>10} {'Correct':>10}")
     print(f"  {'-'*40}")
     for s in all_summaries:
-        print(f"  {s['benchmark']:<20} {s['accuracy']:>10.4f} {s['correct']:>5}/{s['total']:<4}")
+        correct_str = str(s.get('correct', '-'))
+        suffix = f"_avg@{s['avg_at_n']}" if 'avg_at_n' in s else ""
+        print(f"  {s['benchmark'] + suffix:<20} {s['accuracy']:>10.4f} {correct_str:>5}/{s['total']:<4}")
     print(f"{'='*60}")
     print(f"  Results saved to: {output_dir}")
 
