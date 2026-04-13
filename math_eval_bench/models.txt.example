@@ -1,0 +1,12 @@
+# Model list for batch evaluation (run_batch.sh)
+# Format: <model_path> [extra_args...]
+# Lines starting with # are skipped.
+
+# Qwen3-1.7B baseline
+Qwen/Qwen3-1.7B
+
+# RL-optimized checkpoint (with thinking)
+/home/zha00175/data/zha00175/opt_RL_ckpt_hf  --enable-thinking
+
+# RLVR checkpoint
+# /path/to/full_rlvr_ckpt
