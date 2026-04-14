@@ -110,8 +110,8 @@ QUEUE_FILE="$LOG_DIR/task_queue.txt"
 mkdir -p "$LOG_DIR" "$LOCK_DIR"
 
 # ========== Resolve model path ==========
-# Checkpoint structure: CKPT_ROOT/04xxx_exp_name/global_step_NNN/
-# Pick the largest global_step_* directory under each 04* experiment.
+# Checkpoint structure: CKPT_ROOT/04xxx_exp_name/global_step_NNN/actor/huggingface/
+# Pick the largest global_step_* and append actor/huggingface/ if it exists.
 resolve_model_path() {
     local exp_dir="$1"
     local best_step=""
@@ -125,7 +125,14 @@ resolve_model_path() {
         fi
     done
     if [[ -n "$best_step" ]]; then
-        echo "$best_step"
+        # Check for actor/huggingface/ subdirectory
+        if [[ -d "$best_step/actor/huggingface" ]]; then
+            echo "$best_step/actor/huggingface"
+        elif [[ -d "$best_step/actor" ]]; then
+            echo "$best_step/actor"
+        else
+            echo "$best_step"
+        fi
     else
         echo "$exp_dir"
     fi
