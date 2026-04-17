@@ -39,7 +39,7 @@ WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
 WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval}"
 
 # Benchmarks
-BENCHMARKS="math500 gsm8k mbpp humaneval arc_challenge mmlu_pro bbh mgsm ceval amc aime2024 aime2025 olympiadbench gpqa_diamond ifeval"
+BENCHMARKS="math500 gsm8k mbpp humaneval humaneval_plus livecodebench arc_challenge mmlu_pro bbh mgsm ceval amc aime2024 aime2025 olympiadbench gpqa_diamond ifeval"
 
 # Generation params
 TEMPERATURE=0.6

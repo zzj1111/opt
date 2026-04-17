@@ -14,6 +14,8 @@ from .bbh import BBHBenchmark
 from .mgsm import MGSMBenchmark
 from .ceval import CEvalBenchmark
 from .humaneval import HumanEvalBenchmark
+from .humaneval_plus import HumanEvalPlusBenchmark
+from .livecodebench import LiveCodeBenchBenchmark
 from .arc import ARCChallengeBenchmark
 
 BENCHMARKS = {
@@ -21,6 +23,8 @@ BENCHMARKS = {
     "gsm8k": GSM8KBenchmark,
     "mbpp": MBPPBenchmark,
     "humaneval": HumanEvalBenchmark,
+    "humaneval_plus": HumanEvalPlusBenchmark,
+    "livecodebench": LiveCodeBenchBenchmark,
     "ifeval": IFEvalBenchmark,
     "mmlu_pro": MMLUProBenchmark,
     "bbh": BBHBenchmark,
