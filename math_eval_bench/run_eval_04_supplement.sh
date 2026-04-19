@@ -100,10 +100,22 @@ fi
 export WANDB_API_KEY
 export WANDB_ENTITY
 
+# Activate conda env if not already active (e.g. when running inside an
+# existing tmux session that skipped the auto-launch path above).
+if ! python -c "import vllm" >/dev/null 2>&1; then
+    if [[ -f "$CONDA_INIT" ]]; then
+        echo "Activating conda env: $CONDA_ENV_PATH"
+        # shellcheck disable=SC1090
+        source "$CONDA_INIT"
+        conda activate "$CONDA_ENV_PATH"
+    fi
+fi
+
 IFS=',' read -ra GPU_LIST <<< "$GPUS"
 NUM_GPUS=${#GPU_LIST[@]}
 
-PYTHON="${PYTHON:-python3}"
+PYTHON="${PYTHON:-$(command -v python)}"
+[[ -z "$PYTHON" ]] && PYTHON="python3"
 LOCK_DIR="$LOG_DIR/locks"
 QUEUE_FILE="$LOG_DIR/task_queue.txt"
 mkdir -p "$LOG_DIR" "$LOCK_DIR"
