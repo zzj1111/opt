@@ -1,20 +1,15 @@
 #!/bin/bash
 # ==============================================================================
-# Part 2/2: Qwen3-8B-Base Layers 18-35 on NuminaMath-CoT
+# Part 2/2: Qwen3-8B-Base Layers 18-35 on NuminaMath-CoT (4 GPUs)
 # ==============================================================================
 #
-# Experiments (18 total, priority order — multiples of 3 first, all LR=5e-6):
+# Experiments (18 total, priority 3n layers first, all LR=5e-6):
 #   1-6.  Priority layers 18,21,24,27,30,33  (3n in 18-35)
 #   7-18. Fill   layers 19,20,22,23,25,26,28,29,31,32,34,35
 #
 # Qwen3-8B-Base: 36 layers, hidden=4096, intermediate=12288 (~8.2B params).
-# batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072
-# 8 GPUs, TP=1, FSDP. Same micro_batch as 4B-Base scripts (consistent).
-#
-# Usage:
-#   bash run_8b_base_part2_tmux.sh
-#   bash run_8b_base_part2_tmux.sh --skip 5
-#   bash run_8b_base_part2_tmux.sh --no-tmux
+# batch=512, minibatch=128, microbatch=16, epochs=2, max_response_length=3072
+# 4 GPUs (so one 8-GPU node can run Part1 + Part2 concurrently on GPUs 0-3 and 4-7).
 
 set -uo pipefail
 
@@ -23,7 +18,7 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 SCRIPT_NAME=$(basename "$0")
 
 MODEL="Qwen/Qwen3-8B-Base"
-GPUS="0,1,2,3,4,5,6,7"
+GPUS="4,5,6,7"
 CKPT_ROOT="$PROJ_DIR/checkpoints"
 DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
@@ -61,7 +56,7 @@ DATE=$(date +%m%d_%H%M)
 
 run_train() {
     local EXP_NAME="$1" DATA_DIR="$2" LR="$3" FREEZE_ARGS="$4"
-    local BATCH_SIZE="${5:-512}" MINI_BATCH="${6:-128}" MICRO_BATCH="${7:-8}"
+    local BATCH_SIZE="${5:-512}" MINI_BATCH="${6:-128}" MICRO_BATCH="${7:-16}"
     local ROLLOUT_N="${8:-5}" EPOCHS="${9:-2}" SAVE_FREQ="${10:--1}"
     local STEPS_PER_EPOCH
     STEPS_PER_EPOCH=$(python3 -c "import pandas as pd; print(len(pd.read_parquet('$DATA_DIR/train.parquet')) // $BATCH_SIZE)")
@@ -116,10 +111,10 @@ should_run() {
 TOTAL=18
 echo "============================================================"
 echo "  Part 2/2: $MODEL_SHORT — Layers 18-35 ($TOTAL exp)"
-echo "  Data: $DATA_DIR | GPUs: $GPUS ($NGPUS) | epochs=2"
+echo "  Data: $DATA_DIR | GPUs: $GPUS ($NGPUS) | epochs=2 | micro=16"
 echo "============================================================"
 
-# Layer training: priority layers (3n) first, then fill layers, in this order:
+# Layer training: priority (3n) first, then fill
 #   priority: 18, 21, 24, 27, 30, 33
 #   fill:     19, 20, 22, 23, 25, 26, 28, 29, 31, 32, 34, 35
 LAYER_ORDER=(18 21 24 27 30 33  19 20 22 23 25 26 28 29 31 32 34 35)
