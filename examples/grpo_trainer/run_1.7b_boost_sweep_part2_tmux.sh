@@ -137,9 +137,14 @@ echo "============================================================"
 for row in "${EXPS[@]}"; do
     IFS='|' read -r EXP_NUM TOP_N LAYER_IDS BOOST_LR BASE_LR <<< "$row"
     EXP_NAME="${DATE}_p2_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
-    should_run $EXP_NUM && \
-        run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR" && \
-        echo "  [$EXP_NUM/$TOTAL] Done." && echo ""
+    if should_run $EXP_NUM; then
+        run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR"
+        echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up ray/vllm..."
+        ray stop --force 2>/dev/null || true
+        pkill -9 -f vllm 2>/dev/null || true
+        sleep 20
+        echo ""
+    fi
 done
 
 echo ""; echo "  Part 2/2 complete!"
