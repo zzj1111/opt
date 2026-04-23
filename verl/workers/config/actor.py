@@ -287,6 +287,8 @@ class FSDPActorConfig(ActorConfig):
     freeze_except_last_n_layers: int = -1  # -1 = disabled; N = only train last N transformer layers + lm_head + norm
     train_layer_ids: Optional[str] = None  # comma-separated layer indices, e.g. "0,14,27"
     sparse_train_k: int = -1  # -1 = disabled; K = only train K smallest-magnitude params within trainable layers
+    boost_layer_ids: Optional[str] = None  # comma-separated layer indices to give a boosted LR (e.g. "9,10,12")
+    boost_lr: Optional[float] = None  # higher LR applied to params in boost_layer_ids; other params use optim.lr
 
     def __post_init__(self):
         """Validate FSDP actor configuration parameters."""
