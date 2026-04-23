@@ -82,8 +82,8 @@ run_train() {
         data.train_batch_size=$BATCH_SIZE data.max_prompt_length=1024 data.max_response_length=3072 \
         data.filter_overlong_prompts=True "data.truncation='error'" \
         actor_rollout_ref.model.path=$MODEL actor_rollout_ref.actor.optim.lr=$BASE_LR \
-        "actor_rollout_ref.actor.boost_layer_ids='$BOOST_IDS'" \
-        actor_rollout_ref.actor.boost_lr=$BOOST_LR \
+        "+actor_rollout_ref.actor.boost_layer_ids='$BOOST_IDS'" \
+        +actor_rollout_ref.actor.boost_lr=$BOOST_LR \
         actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
         "actor_rollout_ref.actor.optim.betas=[0.9,0.999]" \
         "actor_rollout_ref.actor.checkpoint.save_contents='[\"hf_model\"]'" \
