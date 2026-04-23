@@ -727,16 +727,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         print(f"[boost_lr] WARNING: no params matched boost_layer_ids={sorted(boost_ids)}. "
                               f"Is use_orig_params=True? Skipping boost.")
                 else:
-                    defaults = dict(actor_optimizer.defaults)
-                    optim_cls = type(actor_optimizer)
-                    del actor_optimizer
-                    actor_optimizer = optim_cls(
-                        [
-                            {"params": boost_params, "lr": boost_lr},
-                            {"params": base_params, "lr": base_lr},
-                        ],
-                        **defaults,
-                    )
+                    # In-place modify existing optimizer's param_groups:
+                    # - existing group 0 is already configured (LR=base_lr, correct weight_decay,
+                    #   betas, decoupled_weight_decay etc. from build_optimizer).
+                    # - Remove boost_params from group 0, then add a new group cloned from
+                    #   group 0's hyperparams but with lr=boost_lr.
+                    boost_ids_set = {id(p) for p in boost_params}
+                    existing_group = actor_optimizer.param_groups[0]
+                    existing_group["params"] = [
+                        p for p in existing_group["params"] if id(p) not in boost_ids_set
+                    ]
+                    # Build a cloned group with overridden lr
+                    boost_group = {k: v for k, v in existing_group.items() if k != "params"}
+                    boost_group["params"] = boost_params
+                    boost_group["lr"] = boost_lr
+                    actor_optimizer.add_param_group(boost_group)
+
                     if self.rank == 0:
                         n_b = sum(p.numel() for p in boost_params)
                         n_a = sum(p.numel() for p in base_params)
