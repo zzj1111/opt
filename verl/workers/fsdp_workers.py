@@ -697,6 +697,54 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             actor_optimizer = build_optimizer(actor_module_fsdp.parameters(), optim_config)
 
+            # >>>>>>>>>>>>>>>>>>>>>>
+            # Per-layer LR boost: specific transformer layers get a higher LR
+            # while the rest keep the global lr. Requires use_orig_params=True
+            # on FSDP so we can access individual params by name.
+            boost_ids_cfg = OmegaConf.select(self.config, "actor.boost_layer_ids")
+            boost_lr_cfg = OmegaConf.select(self.config, "actor.boost_lr")
+            if boost_ids_cfg is not None and boost_lr_cfg is not None:
+                boost_ids = set()
+                for tok in str(boost_ids_cfg).split(","):
+                    tok = tok.strip()
+                    if tok:
+                        boost_ids.add(int(tok))
+                boost_lr = float(boost_lr_cfg)
+                base_lr = float(optim_config.lr)
+
+                boost_patterns = tuple(f"model.layers.{i}." for i in boost_ids)
+                boost_params, base_params = [], []
+                for name, p in actor_module_fsdp.named_parameters():
+                    if not p.requires_grad:
+                        continue
+                    if any(pat in name for pat in boost_patterns):
+                        boost_params.append(p)
+                    else:
+                        base_params.append(p)
+
+                if len(boost_params) == 0:
+                    if self.rank == 0:
+                        print(f"[boost_lr] WARNING: no params matched boost_layer_ids={sorted(boost_ids)}. "
+                              f"Is use_orig_params=True? Skipping boost.")
+                else:
+                    defaults = dict(actor_optimizer.defaults)
+                    optim_cls = type(actor_optimizer)
+                    del actor_optimizer
+                    actor_optimizer = optim_cls(
+                        [
+                            {"params": boost_params, "lr": boost_lr},
+                            {"params": base_params, "lr": base_lr},
+                        ],
+                        **defaults,
+                    )
+                    if self.rank == 0:
+                        n_b = sum(p.numel() for p in boost_params)
+                        n_a = sum(p.numel() for p in base_params)
+                        print(f"[boost_lr] boost layers {sorted(boost_ids)}: "
+                              f"{n_b:,} params @ lr={boost_lr}")
+                        print(f"[boost_lr] base layers: {n_a:,} params @ lr={base_lr}")
+            # <<<<<<<<<<<<<<<<<<<<<<<<<
+
             total_steps = optim_config.get("total_training_steps", 0)
             num_warmup_steps = int(optim_config.get("lr_warmup_steps", -1))
             lr_scheduler_type = optim_config.get("lr_scheduler_type", "constant")
