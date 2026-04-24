@@ -1,18 +1,22 @@
 #!/bin/bash
 # ==============================================================================
-# Part 1/2: Qwen3-1.7B-Base boost-LR sweep — top5 & top1 (4 GPUs)
+# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 8 experiments)
 # ==============================================================================
 #
-# Experiments (4 total):
-#   1. top5  boost_lr=5e-6  (main baseline, 10/9/16/12/13)
+# Experiments (8 total, priority 3n-like order):
+#   1. top5  boost_lr=5e-6  (main baseline, layers 10/9/16/12/13)
 #   2. top5  boost_lr=3e-6
 #   3. top1  boost_lr=5e-6  (only L10)
 #   4. top1  boost_lr=3e-6
+#   5. top10 boost_lr=5e-6  (10/9/16/12/13/2/7/14/15/11)
+#   6. top10 boost_lr=3e-6
+#   7. top15 boost_lr=5e-6  (top10 + 1/5/8/0/4)
+#   8. top15 boost_lr=3e-6
 #
 # Layer ranking by single-layer math_avg (no AIME, Qwen3-1.7B-Base).
 # base_lr = 1e-6 (same as full RL baseline).
 # batch=512, mini=128, micro=8, epochs=2, max_response=3072.
-# 4 GPUs (default 0-3) so Part 2 can run on GPUs 4-7 concurrently.
+# 8 GPUs (default 0-7), runs one exp at a time.
 
 set -uo pipefail
 
@@ -21,7 +25,7 @@ PROJ_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 SCRIPT_NAME=$(basename "$0")
 
 MODEL="Qwen/Qwen3-1.7B-Base"
-GPUS="0,1,2,3"
+GPUS="0,1,2,3,4,5,6,7"
 CKPT_ROOT="$PROJ_DIR/checkpoints"
 DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
@@ -42,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
-    TMUX_SESSION="boost_p1_$(date +%m%d_%H%M)"
+    TMUX_SESSION="boost_sweep_$(date +%m%d_%H%M)"
     FULL_ARGS="--no-tmux --gpus $(printf '%q' "$GPUS") --model $(printf '%q' "$MODEL") --ckpt-root $(printf '%q' "$CKPT_ROOT") --data-dir $(printf '%q' "$DATA_DIR")"
     [[ $SKIP -gt 0 ]] && FULL_ARGS="$FULL_ARGS --skip $SKIP"
     [[ -n "$ONLY" ]] && FULL_ARGS="$FULL_ARGS --only $(printf '%q' "$ONLY")"
@@ -116,42 +120,45 @@ should_run() {
     if [[ -n "$ONLY" ]]; then echo "$ONLY" | tr ',' '\n' | grep -qx "$n"; else [[ $n -gt $SKIP ]]; fi
 }
 
-TOP5="10,9,16,12,13"
 TOP1="10"
+TOP5="10,9,16,12,13"
+TOP10="10,9,16,12,13,2,7,14,15,11"
+TOP15="10,9,16,12,13,2,7,14,15,11,1,5,8,0,4"
 
-# Part 1: top5 (most important) first, then top1
+# Sweep: top5 (main baseline) → top1 → top10 → top15
 #   exp_num | top_N | layer_ids | boost_lr | base_lr
 declare -a EXPS=(
     "1|5|$TOP5|5e-6|1e-6"
     "2|5|$TOP5|3e-6|1e-6"
     "3|1|$TOP1|5e-6|1e-6"
     "4|1|$TOP1|3e-6|1e-6"
+    "5|10|$TOP10|5e-6|1e-6"
+    "6|10|$TOP10|3e-6|1e-6"
+    "7|15|$TOP15|5e-6|1e-6"
+    "8|15|$TOP15|3e-6|1e-6"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
-echo "  Part 1/2: boost sweep  top5 + top1 ($TOTAL exp)"
-echo "  GPUs: $GPUS ($NGPUS) | base_lr=1e-6 | epochs=2"
+echo "  Boost sweep: $MODEL_SHORT on NuminaMath-CoT  ($TOTAL exp sequential)"
+echo "  Base LR = 1e-6, boost LR ∈ {5e-6, 3e-6}"
+echo "  Top N ∈ {5, 1, 10, 15} — order: top5 first (main), then top1, top10, top15"
+echo "  GPUs: $GPUS ($NGPUS) | epochs=2"
 echo "============================================================"
 
 for row in "${EXPS[@]}"; do
     IFS='|' read -r EXP_NUM TOP_N LAYER_IDS BOOST_LR BASE_LR <<< "$row"
-    EXP_NAME="${DATE}_p1_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
+    EXP_NAME="${DATE}_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
     if should_run $EXP_NUM; then
         run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR"
-        echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up processes on GPUs [$GPUS]..."
-        # Kill ONLY processes holding our GPUs — does not touch other parts' ray cluster
-        for gpu in $(echo "$GPUS" | tr ',' ' '); do
-            for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$gpu" 2>/dev/null | sort -u); do
-                cmd=$(ps -p "$pid" -o cmd= 2>/dev/null || true)
-                if echo "$cmd" | grep -qE "main_ppo|vllm|ray::|raylet"; then
-                    kill -9 "$pid" 2>/dev/null || true
-                fi
-            done
-        done
+        echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up ray/vllm before next exp..."
+        # Safe to use node-wide since we're the only job running on this node
+        ray stop --force 2>/dev/null || true
+        pkill -9 -f main_ppo 2>/dev/null || true
+        pkill -9 -f vllm 2>/dev/null || true
         sleep 25
         echo ""
     fi
 done
 
-echo ""; echo "  Part 1/2 complete!"
+echo ""; echo "  Sweep complete!"
