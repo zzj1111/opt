@@ -1,21 +1,36 @@
 #!/bin/bash
 # ==============================================================================
-# Ablation: Qwen3-1.7B-Base boost the WORST 5 layers (expect degradation)
+# Ablation: Qwen3-1.7B-Base boost the WORST N layers (expect degradation)
 # ==============================================================================
 #
-# Mirror of main sweep's top5 exp1/exp2, but boost the 5 worst-performing
-# layers (by single-layer math_avg, no AIME) instead of the best:
-#   worst5 = L21, L22, L24, L25, L26  (math_avg 0.4714-0.4797, all << full)
+# Ablation design:
+#   - Main sweep boosts TOP N layers (best math_avg) — shows gain over full RL.
+#   - This script boosts WORST N layers (worst math_avg) — should show
+#     degradation, proving that LAYER SELECTION matters (not just "more LR
+#     on any subset").
 #
-# Expected: boosting these deep layers should HURT full RL performance,
-# confirming that layer selection matters (not just "more LR on any subset").
+# Experiments (6 total):
+#   1. worst5  boost_lr=5e-6   (paired with main sweep exp1: top5 @ 5e-6)
+#   2. worst5  boost_lr=3e-6   (paired with main sweep exp2: top5 @ 3e-6)
+#   3. worst1  boost_lr=5e-6   (paired with main sweep exp3: top1 @ 5e-6)
+#   4. worst1  boost_lr=3e-6   (paired with main sweep exp4: top1 @ 3e-6)
+#   5. worst10 boost_lr=5e-6   (paired with main sweep exp5: top10 @ 5e-6)
+#   6. worst10 boost_lr=3e-6   (paired with main sweep exp6: top10 @ 3e-6)
 #
-# Experiments (2 total):
-#   1. worst5 boost_lr=5e-6   (paired with main sweep exp1: top5 @ 5e-6)
-#   2. worst5 boost_lr=3e-6   (paired with main sweep exp2: top5 @ 3e-6)
+# Worst-N selection (single-layer math_avg, no AIME, ascending):
+#   worst1  = [25]                                        — L25 is the single
+#                                                           worst (0.4714)
+#   worst5  = [25, 24, 26, 22, 21]                        — math_avg range
+#                                                           0.4714-0.4797
+#   worst10 = [25, 24, 26, 22, 21, 23, 27, 18, 3, 17]     — math_avg range
+#                                                           0.4714-0.4937
 #
-# base_lr = 1e-6, batch=512, mini=128, micro=8, epochs=2, max_response=3072.
-# 8 GPUs sequential.
+# Reference: full RL baseline math_avg = 0.5122 (much higher than worst-N
+# layers' single-layer scores).
+#
+# base_lr=1e-6, batch=512, mini=128, micro=8, epochs=2, max_response=3072.
+# 8 GPUs sequential. Order: worst5 first (main baseline pair), then worst1,
+# then worst10.
 
 set -uo pipefail
 
@@ -45,7 +60,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
-    TMUX_SESSION="boost_worst5_$(date +%m%d_%H%M)"
+    TMUX_SESSION="boost_worst_abl_$(date +%m%d_%H%M)"
     FULL_ARGS="--no-tmux --gpus $(printf '%q' "$GPUS") --model $(printf '%q' "$MODEL") --ckpt-root $(printf '%q' "$CKPT_ROOT") --data-dir $(printf '%q' "$DATA_DIR")"
     [[ $SKIP -gt 0 ]] && FULL_ARGS="$FULL_ARGS --skip $SKIP"
     [[ -n "$ONLY" ]] && FULL_ARGS="$FULL_ARGS --only $(printf '%q' "$ONLY")"
@@ -119,26 +134,37 @@ should_run() {
     if [[ -n "$ONLY" ]]; then echo "$ONLY" | tr ',' '\n' | grep -qx "$n"; else [[ $n -gt $SKIP ]]; fi
 }
 
-# Bottom 5 layers by single-layer math_avg (no AIME)
-#   L25: 0.4714   L24: 0.4715   L26: 0.4752   L22: 0.4790   L21: 0.4797
+# Worst-N layer sets (by single-layer math_avg, no AIME, ascending order)
+WORST1="25"
 WORST5="25,24,26,22,21"
+WORST10="25,24,26,22,21,23,27,18,3,17"
 
-#   exp_num | layer_ids | boost_lr | base_lr
+#   exp_num | top_N | layer_ids | boost_lr | base_lr
 declare -a EXPS=(
-    "1|$WORST5|5e-6|1e-6"
-    "2|$WORST5|3e-6|1e-6"
+    "1|5|$WORST5|5e-6|1e-6"
+    "2|5|$WORST5|3e-6|1e-6"
+    "3|1|$WORST1|5e-6|1e-6"
+    "4|1|$WORST1|3e-6|1e-6"
+    "5|10|$WORST10|5e-6|1e-6"
+    "6|10|$WORST10|3e-6|1e-6"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
-echo "  Ablation: boost WORST5 layers (L21,22,24,25,26)  ($TOTAL exp)"
-echo "  Expected: degradation vs main-sweep top5 baselines"
-echo "  GPUs: $GPUS ($NGPUS) | base_lr=1e-6 | epochs=2"
+echo "  Ablation: boost WORST N layers  ($TOTAL exp sequential)"
+echo "  Paired with main sweep's top{5,1,10} exp1-6 for comparison."
+echo "  Expected: degradation vs main sweep + degradation vs full RL."
+echo ""
+echo "  worst1  = [25]"
+echo "  worst5  = [25, 24, 26, 22, 21]"
+echo "  worst10 = [25, 24, 26, 22, 21, 23, 27, 18, 3, 17]"
+echo ""
+echo "  GPUs: $GPUS ($NGPUS) | base_lr=1e-6 | boost_lr∈{5e-6, 3e-6} | epochs=2"
 echo "============================================================"
 
 for row in "${EXPS[@]}"; do
-    IFS='|' read -r EXP_NUM LAYER_IDS BOOST_LR BASE_LR <<< "$row"
-    EXP_NAME="${DATE}_abl_exp${EXP_NUM}_boost_worst5_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
+    IFS='|' read -r EXP_NUM TOP_N LAYER_IDS BOOST_LR BASE_LR <<< "$row"
+    EXP_NAME="${DATE}_abl_exp${EXP_NUM}_boost_worst${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
     if should_run $EXP_NUM; then
         run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR"
         echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up..."
@@ -150,4 +176,4 @@ for row in "${EXPS[@]}"; do
     fi
 done
 
-echo ""; echo "  Worst5 ablation complete!"
+echo ""; echo "  Worst-N boost ablation complete!"
