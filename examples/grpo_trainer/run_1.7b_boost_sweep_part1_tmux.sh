@@ -139,10 +139,17 @@ for row in "${EXPS[@]}"; do
     EXP_NAME="${DATE}_p1_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
     if should_run $EXP_NUM; then
         run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR"
-        echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up ray/vllm..."
-        ray stop --force 2>/dev/null || true
-        pkill -9 -f vllm 2>/dev/null || true
-        sleep 20
+        echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up processes on GPUs [$GPUS]..."
+        # Kill ONLY processes holding our GPUs — does not touch other parts' ray cluster
+        for gpu in $(echo "$GPUS" | tr ',' ' '); do
+            for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$gpu" 2>/dev/null | sort -u); do
+                cmd=$(ps -p "$pid" -o cmd= 2>/dev/null || true)
+                if echo "$cmd" | grep -qE "main_ppo|vllm|ray::|raylet"; then
+                    kill -9 "$pid" 2>/dev/null || true
+                fi
+            done
+        done
+        sleep 25
         echo ""
     fi
 done
