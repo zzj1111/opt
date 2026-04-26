@@ -18,6 +18,7 @@
 #   bash run_eval_boost_math.sh --max-tokens "3072"   # Only 3k (default: "8192")
 #   bash run_eval_boost_math.sh --temperature 0.6     # Override temperature (default: 0.7)
 #   bash run_eval_boost_math.sh --pattern "*boost*"   # Override match glob
+#   bash run_eval_boost_math.sh --force               # Re-run even if outputs exist
 #
 # Output dir / wandb run-name include a temperature tag (t07, t06, ...) so
 # repeated runs at different T do not overwrite each other.
@@ -58,6 +59,7 @@ AVG_AT_MAP="amc:32"
 # Parsing
 DRY_RUN=false
 NO_TMUX=false
+FORCE=false
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --pattern)         PATTERN="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --no-tmux)         NO_TMUX=true; shift ;;
+        --force)           FORCE=true; shift ;;
         --benchmarks)      BENCHMARKS="$2"; shift 2 ;;
         --wandb-project)   WANDB_PROJECT="$2"; shift 2 ;;
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
@@ -92,6 +95,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
     FULL_ARGS="$FULL_ARGS --temperature $(printf '%q' "$TEMPERATURE")"
     $DRY_RUN && FULL_ARGS="$FULL_ARGS --dry-run"
+    $FORCE   && FULL_ARGS="$FULL_ARGS --force"
     [[ -n "$BENCHMARKS" ]] && FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
 
@@ -174,11 +178,14 @@ fi
 
 shopt -s nullglob
 SKIPPED_NO_MODEL=()
+SKIPPED_ALREADY_DONE=()
+MATCHED_DIRS=0
 > "$QUEUE_FILE"
 for d in "$CKPT_ROOT"/$PATTERN; do
     [[ -d "$d" ]] || continue
     exp_name=$(basename "$d")
     [[ "$exp_name" == .* ]] && continue
+    MATCHED_DIRS=$((MATCHED_DIRS + 1))
 
     model_path=$(resolve_model_path "$d")
     if [[ -z "$model_path" ]]; then
@@ -191,7 +198,8 @@ for d in "$CKPT_ROOT"/$PATTERN; do
         [[ "$mt" == "3072" ]] && tok_tag="3k"
         [[ "$mt" == "8192" ]] && tok_tag="8k"
         output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}_${T_TAG}"
-        if [[ -f "$output_dir/overall_summary.json" ]]; then
+        if [[ -f "$output_dir/overall_summary.json" ]] && ! $FORCE; then
+            SKIPPED_ALREADY_DONE+=("${exp_name}_${tok_tag}_${T_TAG}")
             continue
         fi
         echo "$model_path|$exp_name|$mt|$tok_tag" >> "$QUEUE_FILE"
@@ -203,17 +211,19 @@ TOTAL_TASKS=$(wc -l < "$QUEUE_FILE")
 
 echo "============================================================"
 echo "  Boost Math Eval — Worker Mode"
-echo "  Ckpt root:     $CKPT_ROOT"
-echo "  Pattern:       $PATTERN"
-echo "  Pending tasks: $TOTAL_TASKS"
-echo "  Skipped (no valid model): ${#SKIPPED_NO_MODEL[@]}"
-echo "  Max tokens:    $MAX_TOKENS_LIST"
-echo "  Benchmarks:    $BENCHMARKS"
-echo "  Avg@N:         $AVG_AT_MAP"
-echo "  GPUs:          ${GPU_LIST[*]} ($NUM_GPUS workers, TP=1)"
-echo "  Params:        T=$TEMPERATURE ($T_TAG) P=$TOP_P K=$TOP_K"
-echo "  WandB:         $WANDB_ENTITY / $WANDB_PROJECT"
-echo "  Results:       $RESULTS_BASE"
+echo "  Ckpt root:                 $CKPT_ROOT"
+echo "  Pattern:                   $PATTERN"
+echo "  Matched directories:       $MATCHED_DIRS"
+echo "  Skipped (no valid model):  ${#SKIPPED_NO_MODEL[@]}"
+echo "  Skipped (already done):    ${#SKIPPED_ALREADY_DONE[@]}  (use --force to re-run)"
+echo "  Pending tasks:             $TOTAL_TASKS"
+echo "  Max tokens:                $MAX_TOKENS_LIST"
+echo "  Benchmarks:                $BENCHMARKS"
+echo "  Avg@N:                     $AVG_AT_MAP"
+echo "  GPUs:                      ${GPU_LIST[*]} ($NUM_GPUS workers, TP=1)"
+echo "  Params:                    T=$TEMPERATURE ($T_TAG) P=$TOP_P K=$TOP_K"
+echo "  WandB:                     $WANDB_ENTITY / $WANDB_PROJECT"
+echo "  Results:                   $RESULTS_BASE"
 echo "============================================================"
 echo ""
 
@@ -223,6 +233,21 @@ if (( ${#SKIPPED_NO_MODEL[@]} > 0 )); then
         echo "  - $name"
     done
     echo ""
+fi
+
+if (( ${#SKIPPED_ALREADY_DONE[@]} > 0 )); then
+    echo "Skipped (overall_summary.json already exists at this T tag):"
+    for name in "${SKIPPED_ALREADY_DONE[@]}"; do
+        echo "  - $name"
+    done
+    echo ""
+fi
+
+if [[ $MATCHED_DIRS -eq 0 ]]; then
+    echo "WARNING: pattern '$PATTERN' matched zero directories under $CKPT_ROOT."
+    echo "  -> Either the ckpt root is wrong, or no checkpoints have been trained yet."
+    echo "  -> Sanity check: ls -d $CKPT_ROOT/$PATTERN"
+    exit 0
 fi
 
 if $DRY_RUN; then
@@ -236,7 +261,9 @@ if $DRY_RUN; then
 fi
 
 if [[ $TOTAL_TASKS -eq 0 ]]; then
-    echo "All tasks already completed!"
+    echo "All matched checkpoints already evaluated at T=$TEMPERATURE."
+    echo "  -> Re-run with --force to overwrite existing _${T_TAG} results, OR"
+    echo "  -> change --temperature to evaluate at a different T."
     exit 0
 fi
 
