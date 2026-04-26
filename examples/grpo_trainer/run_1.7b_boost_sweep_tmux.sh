@@ -1,20 +1,17 @@
 #!/bin/bash
 # ==============================================================================
-# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 8 experiments)
+# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 4 experiments)
 # ==============================================================================
 #
-# Experiments (8 total, priority 3n-like order):
-#   1. top5  boost_lr=5e-6  (main baseline, layers 10/9/16/12/13)
-#   2. top5  boost_lr=3e-6
-#   3. top1  boost_lr=5e-6  (only L10)
-#   4. top1  boost_lr=3e-6
-#   5. top10 boost_lr=5e-6  (10/9/16/12/13/2/7/14/15/11)
-#   6. top10 boost_lr=3e-6
-#   7. top15 boost_lr=5e-6  (top10 + 1/5/8/0/4)
-#   8. top15 boost_lr=3e-6
+# Experiments (4 total, top5 first as main baseline):
+#   1. top5  boost_lr=2e-6  (main baseline, layers 10/9/16/12/13)
+#   2. top1  boost_lr=2e-6  (only L10)
+#   3. top10 boost_lr=2e-6  (10/9/16/12/13/2/7/14/15/11)
+#   4. top15 boost_lr=2e-6  (top10 + 1/5/8/0/4)
 #
 # Layer ranking by single-layer math_avg (no AIME, Qwen3-1.7B-Base).
-# base_lr = 1e-6 (same as full RL baseline).
+# base_lr  = 1e-6 (same as full RL baseline).
+# boost_lr = 2e-6 (single value — previous {5e-6, 3e-6} sweep replaced).
 # batch=512, mini=128, micro=8, epochs=2, max_response=3072.
 # 8 GPUs (default 0-7), runs one exp at a time.
 
@@ -128,20 +125,16 @@ TOP15="10,9,16,12,13,2,7,14,15,11,1,5,8,0,4"
 # Sweep: top5 (main baseline) → top1 → top10 → top15
 #   exp_num | top_N | layer_ids | boost_lr | base_lr
 declare -a EXPS=(
-    "1|5|$TOP5|5e-6|1e-6"
-    "2|5|$TOP5|3e-6|1e-6"
-    "3|1|$TOP1|5e-6|1e-6"
-    "4|1|$TOP1|3e-6|1e-6"
-    "5|10|$TOP10|5e-6|1e-6"
-    "6|10|$TOP10|3e-6|1e-6"
-    "7|15|$TOP15|5e-6|1e-6"
-    "8|15|$TOP15|3e-6|1e-6"
+    "1|5|$TOP5|2e-6|1e-6"
+    "2|1|$TOP1|2e-6|1e-6"
+    "3|10|$TOP10|2e-6|1e-6"
+    "4|15|$TOP15|2e-6|1e-6"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
 echo "  Boost sweep: $MODEL_SHORT on NuminaMath-CoT  ($TOTAL exp sequential)"
-echo "  Base LR = 1e-6, boost LR ∈ {5e-6, 3e-6}"
+echo "  Base LR = 1e-6, boost LR = 2e-6"
 echo "  Top N ∈ {5, 1, 10, 15} — order: top5 first (main), then top1, top10, top15"
 echo "  GPUs: $GPUS ($NGPUS) | epochs=2"
 echo "============================================================"

@@ -9,13 +9,10 @@
 #     degradation, proving that LAYER SELECTION matters (not just "more LR
 #     on any subset").
 #
-# Experiments (6 total):
-#   1. worst5  boost_lr=5e-6   (paired with main sweep exp1: top5 @ 5e-6)
-#   2. worst5  boost_lr=3e-6   (paired with main sweep exp2: top5 @ 3e-6)
-#   3. worst1  boost_lr=5e-6   (paired with main sweep exp3: top1 @ 5e-6)
-#   4. worst1  boost_lr=3e-6   (paired with main sweep exp4: top1 @ 3e-6)
-#   5. worst10 boost_lr=5e-6   (paired with main sweep exp5: top10 @ 5e-6)
-#   6. worst10 boost_lr=3e-6   (paired with main sweep exp6: top10 @ 3e-6)
+# Experiments (3 total — single boost_lr=2e-6 to match main sweep):
+#   1. worst5  boost_lr=2e-6   (paired with main sweep exp1: top5 @ 2e-6)
+#   2. worst1  boost_lr=2e-6   (paired with main sweep exp2: top1 @ 2e-6)
+#   3. worst10 boost_lr=2e-6   (paired with main sweep exp3: top10 @ 2e-6)
 #
 # Worst-N selection (single-layer math_avg, no AIME, ascending):
 #   worst1  = [25]                                        — L25 is the single
@@ -141,25 +138,22 @@ WORST10="25,24,26,22,21,23,27,18,3,17"
 
 #   exp_num | top_N | layer_ids | boost_lr | base_lr
 declare -a EXPS=(
-    "1|5|$WORST5|5e-6|1e-6"
-    "2|5|$WORST5|3e-6|1e-6"
-    "3|1|$WORST1|5e-6|1e-6"
-    "4|1|$WORST1|3e-6|1e-6"
-    "5|10|$WORST10|5e-6|1e-6"
-    "6|10|$WORST10|3e-6|1e-6"
+    "1|5|$WORST5|2e-6|1e-6"
+    "2|1|$WORST1|2e-6|1e-6"
+    "3|10|$WORST10|2e-6|1e-6"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
 echo "  Ablation: boost WORST N layers  ($TOTAL exp sequential)"
-echo "  Paired with main sweep's top{5,1,10} exp1-6 for comparison."
+echo "  Paired with main sweep's top{5,1,10} exp1-3 for comparison."
 echo "  Expected: degradation vs main sweep + degradation vs full RL."
 echo ""
 echo "  worst1  = [25]"
 echo "  worst5  = [25, 24, 26, 22, 21]"
 echo "  worst10 = [25, 24, 26, 22, 21, 23, 27, 18, 3, 17]"
 echo ""
-echo "  GPUs: $GPUS ($NGPUS) | base_lr=1e-6 | boost_lr∈{5e-6, 3e-6} | epochs=2"
+echo "  GPUs: $GPUS ($NGPUS) | base_lr=1e-6 | boost_lr=2e-6 | epochs=2"
 echo "============================================================"
 
 for row in "${EXPS[@]}"; do
