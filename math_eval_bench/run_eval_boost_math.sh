@@ -45,7 +45,7 @@ BENCHMARKS="math500 gsm8k amc olympiadbench mgsm"
 TEMPERATURE=0.6
 TOP_P=0.95
 TOP_K=20
-MAX_TOKENS_LIST="3072 8192"
+MAX_TOKENS_LIST="8192"
 SEED=42
 
 # average@N for competition benchmarks (AMC only since AIME is dropped)
