@@ -1,16 +1,27 @@
 #!/bin/bash
 # ==============================================================================
-# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 5 experiments)
+# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 10 experiments)
 # ==============================================================================
 #
-# Experiments (5 total, top5 first as main baseline):
-#   Boost variants  — base_lr=1e-6 everywhere + boost_lr=2e-6 on listed layers:
-#     1. top5  boost  (layers 10/9/16/12/13)
-#     2. top1  boost  (layer 10)
-#     3. top10 boost  (10/9/16/12/13/2/7/14/15/11)
-#   Train-only variants — train ONLY listed layers, freeze the rest, LR=2e-6:
-#     4. top5  only   (10/9/16/12/13)
-#     5. top10 only   (10/9/16/12/13/2/7/14/15/11)
+# Experiments (10 total, runs back-to-back so GPUs never idle).
+#
+# Phase A — Top-N boost (priority, runs first):
+#   1. top5  boost  (10/9/16/12/13)               base_lr=1e-6  boost_lr=2e-6
+#   2. top1  boost  (10)                          base_lr=1e-6  boost_lr=2e-6
+#   3. top10 boost  (10/9/16/12/13/2/7/14/15/11)  base_lr=1e-6  boost_lr=2e-6
+#
+# Phase B — Top-N train-only (freeze the rest):
+#   4. top5  only   (10/9/16/12/13)               lr=2e-6
+#   5. top10 only   (10/9/16/12/13/2/7/14/15/11)  lr=2e-6
+#
+# Phase C — Worst-N boost ablation (paired with Phase A; expects degradation):
+#   6. worst5  boost  (25/24/26/22/21)                  base_lr=1e-6  boost_lr=2e-6
+#   7. worst1  boost  (25)                              base_lr=1e-6  boost_lr=2e-6
+#   8. worst10 boost  (25/24/26/22/21/23/27/18/3/17)    base_lr=1e-6  boost_lr=2e-6
+#
+# Phase D — Worst-N train-only ablation (paired with Phase B):
+#   9.  worst5  only   (25/24/26/22/21)                 lr=2e-6
+#   10. worst10 only   (25/24/26/22/21/23/27/18/3/17)   lr=2e-6
 #
 # Layer ranking by single-layer math_avg (no AIME, Qwen3-1.7B-Base).
 # batch=512, mini=128, micro=8, epochs=2, max_response=3072.
@@ -139,33 +150,46 @@ should_run() {
 TOP1="10"
 TOP5="10,9,16,12,13"
 TOP10="10,9,16,12,13,2,7,14,15,11"
+WORST1="25"
+WORST5="25,24,26,22,21"
+WORST10="25,24,26,22,21,23,27,18,3,17"
 
-# Sweep order: top5 boost (main baseline) → top1 boost → top10 boost
-#              → top5 only → top10 only
-#   exp_num | top_N | layer_ids | boost_lr | base_lr | mode
+# Phases run back-to-back so GPUs never sit idle.
+#   exp_num | tag | N | layer_ids | boost_lr | base_lr | mode | layer_kind
 declare -a EXPS=(
-    "1|5|$TOP5|2e-6|1e-6|boost"
-    "2|1|$TOP1|2e-6|1e-6|boost"
-    "3|10|$TOP10|2e-6|1e-6|boost"
-    "4|5|$TOP5|2e-6|1e-6|only"
-    "5|10|$TOP10|2e-6|1e-6|only"
+    # Phase A — top-N boost (priority)
+    "1|top|5|$TOP5|2e-6|1e-6|boost|top"
+    "2|top|1|$TOP1|2e-6|1e-6|boost|top"
+    "3|top|10|$TOP10|2e-6|1e-6|boost|top"
+    # Phase B — top-N train-only
+    "4|top|5|$TOP5|2e-6|1e-6|only|top"
+    "5|top|10|$TOP10|2e-6|1e-6|only|top"
+    # Phase C — worst-N boost ablation
+    "6|wst|5|$WORST5|2e-6|1e-6|boost|worst"
+    "7|wst|1|$WORST1|2e-6|1e-6|boost|worst"
+    "8|wst|10|$WORST10|2e-6|1e-6|boost|worst"
+    # Phase D — worst-N train-only ablation
+    "9|wst|5|$WORST5|2e-6|1e-6|only|worst"
+    "10|wst|10|$WORST10|2e-6|1e-6|only|worst"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
 echo "  Boost sweep: $MODEL_SHORT on NuminaMath-CoT  ($TOTAL exp sequential)"
-echo "  Boost variants:  base_lr=1e-6 + boost_lr=2e-6 on top-N (3 exp)"
-echo "  Train-only:      LR=2e-6 on top-N, freeze the rest      (2 exp)"
-echo "  Top N ∈ {5, 1, 10}"
+echo "  Phase A (1-3):  top-N boost     base_lr=1e-6 + boost_lr=2e-6"
+echo "  Phase B (4-5):  top-N only      lr=2e-6"
+echo "  Phase C (6-8):  worst-N boost   ablation paired with A"
+echo "  Phase D (9-10): worst-N only    ablation paired with B"
 echo "  GPUs: $GPUS ($NGPUS) | epochs=2"
+echo "  Use --skip N or --only 1,3,5 to control which exps run."
 echo "============================================================"
 
 for row in "${EXPS[@]}"; do
-    IFS='|' read -r EXP_NUM TOP_N LAYER_IDS BOOST_LR BASE_LR MODE <<< "$row"
+    IFS='|' read -r EXP_NUM TAG TOP_N LAYER_IDS BOOST_LR BASE_LR MODE LAYER_KIND <<< "$row"
     if [[ "$MODE" == "only" ]]; then
-        EXP_NAME="${DATE}_exp${EXP_NUM}_only_top${TOP_N}_${MODEL_SHORT}_numina_cot_lr${BOOST_LR}"
+        EXP_NAME="${DATE}_exp${EXP_NUM}_only_${LAYER_KIND}${TOP_N}_${MODEL_SHORT}_numina_cot_lr${BOOST_LR}"
     else
-        EXP_NAME="${DATE}_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
+        EXP_NAME="${DATE}_exp${EXP_NUM}_boost_${LAYER_KIND}${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
     fi
     if should_run $EXP_NUM; then
         run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR" "$MODE"
