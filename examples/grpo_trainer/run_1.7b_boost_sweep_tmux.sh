@@ -1,17 +1,18 @@
 #!/bin/bash
 # ==============================================================================
-# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 4 experiments)
+# Qwen3-1.7B-Base boost-LR sweep (8 GPUs, sequential 5 experiments)
 # ==============================================================================
 #
-# Experiments (4 total, top5 first as main baseline):
-#   1. top5  boost_lr=2e-6  (main baseline, layers 10/9/16/12/13)
-#   2. top1  boost_lr=2e-6  (only L10)
-#   3. top10 boost_lr=2e-6  (10/9/16/12/13/2/7/14/15/11)
-#   4. top15 boost_lr=2e-6  (top10 + 1/5/8/0/4)
+# Experiments (5 total, top5 first as main baseline):
+#   Boost variants  — base_lr=1e-6 everywhere + boost_lr=2e-6 on listed layers:
+#     1. top5  boost  (layers 10/9/16/12/13)
+#     2. top1  boost  (layer 10)
+#     3. top10 boost  (10/9/16/12/13/2/7/14/15/11)
+#   Train-only variants — train ONLY listed layers, freeze the rest, LR=2e-6:
+#     4. top5  only   (10/9/16/12/13)
+#     5. top10 only   (10/9/16/12/13/2/7/14/15/11)
 #
 # Layer ranking by single-layer math_avg (no AIME, Qwen3-1.7B-Base).
-# base_lr  = 1e-6 (same as full RL baseline).
-# boost_lr = 2e-6 (single value — previous {5e-6, 3e-6} sweep replaced).
 # batch=512, mini=128, micro=8, epochs=2, max_response=3072.
 # 8 GPUs (default 0-7), runs one exp at a time.
 
@@ -59,19 +60,38 @@ DATE=$(date +%m%d_%H%M)
 [[ ! -f "$DATA_DIR/train.parquet" ]] && echo "ERROR: $DATA_DIR/train.parquet not found" && exit 1
 
 run_train() {
-    local EXP_NAME="$1" BOOST_IDS="$2" BOOST_LR="$3"
-    local BASE_LR="${4:-1e-6}"
-    local BATCH_SIZE="${5:-512}" MINI_BATCH="${6:-128}" MICRO_BATCH="${7:-8}"
-    local ROLLOUT_N="${8:-5}" EPOCHS="${9:-2}" SAVE_FREQ="${10:--1}"
+    # MODE = "boost"  -> base_lr everywhere + boost_lr on LAYER_IDS (current behaviour)
+    # MODE = "only"   -> train ONLY LAYER_IDS at LR=BOOST_LR, freeze the rest
+    local EXP_NAME="$1" LAYER_IDS="$2" BOOST_LR="$3"
+    local BASE_LR="${4:-1e-6}" MODE="${5:-boost}"
+    local BATCH_SIZE="${6:-512}" MINI_BATCH="${7:-128}" MICRO_BATCH="${8:-8}"
+    local ROLLOUT_N="${9:-5}" EPOCHS="${10:-2}" SAVE_FREQ="${11:--1}"
     local STEPS_PER_EPOCH
     STEPS_PER_EPOCH=$(python3 -c "import pandas as pd; print(len(pd.read_parquet('$DATA_DIR/train.parquet')) // $BATCH_SIZE)")
     local TOTAL_STEPS=$((STEPS_PER_EPOCH * EPOCHS))
     [[ "$SAVE_FREQ" == "-1" ]] && SAVE_FREQ=$TOTAL_STEPS
     mkdir -p "$CKPT_ROOT/$EXP_NAME"
     local LOG_FILE="$CKPT_ROOT/$EXP_NAME/train.log"
-    echo "  ---- $EXP_NAME ----"
-    echo "  Model=$MODEL  base_lr=$BASE_LR  boost_lr=$BOOST_LR  boost_ids=[$BOOST_IDS]"
+
+    # Build mode-specific overrides
+    local LAYER_OVERRIDES
+    local LR_FOR_OPTIM
+    if [[ "$MODE" == "only" ]]; then
+        LAYER_OVERRIDES=("+actor_rollout_ref.actor.train_layer_ids='$LAYER_IDS'")
+        LR_FOR_OPTIM="$BOOST_LR"
+        echo "  ---- $EXP_NAME ----"
+        echo "  Model=$MODEL  mode=only  lr=$BOOST_LR  train_layer_ids=[$LAYER_IDS]"
+    else
+        LAYER_OVERRIDES=(
+            "+actor_rollout_ref.actor.boost_layer_ids='$LAYER_IDS'"
+            "+actor_rollout_ref.actor.boost_lr=$BOOST_LR"
+        )
+        LR_FOR_OPTIM="$BASE_LR"
+        echo "  ---- $EXP_NAME ----"
+        echo "  Model=$MODEL  mode=boost  base_lr=$BASE_LR  boost_lr=$BOOST_LR  boost_ids=[$LAYER_IDS]"
+    fi
     echo "  Epochs=$EPOCHS  Steps=$TOTAL_STEPS  GPUs=$NGPUS"
+
     export CUDA_VISIBLE_DEVICES=$GPUS
     export WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
     export WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
@@ -82,9 +102,8 @@ run_train() {
         "data.val_files='$DATA_DIR/test.parquet'" \
         data.train_batch_size=$BATCH_SIZE data.max_prompt_length=1024 data.max_response_length=3072 \
         data.filter_overlong_prompts=True "data.truncation='error'" \
-        actor_rollout_ref.model.path=$MODEL actor_rollout_ref.actor.optim.lr=$BASE_LR \
-        "+actor_rollout_ref.actor.boost_layer_ids='$BOOST_IDS'" \
-        +actor_rollout_ref.actor.boost_lr=$BOOST_LR \
+        actor_rollout_ref.model.path=$MODEL actor_rollout_ref.actor.optim.lr=$LR_FOR_OPTIM \
+        "${LAYER_OVERRIDES[@]}" \
         actor_rollout_ref.actor.fsdp_config.use_orig_params=True \
         "actor_rollout_ref.actor.optim.betas=[0.9,0.999]" \
         "actor_rollout_ref.actor.checkpoint.save_contents='[\"hf_model\"]'" \
@@ -120,30 +139,36 @@ should_run() {
 TOP1="10"
 TOP5="10,9,16,12,13"
 TOP10="10,9,16,12,13,2,7,14,15,11"
-TOP15="10,9,16,12,13,2,7,14,15,11,1,5,8,0,4"
 
-# Sweep: top5 (main baseline) → top1 → top10 → top15
-#   exp_num | top_N | layer_ids | boost_lr | base_lr
+# Sweep order: top5 boost (main baseline) → top1 boost → top10 boost
+#              → top5 only → top10 only
+#   exp_num | top_N | layer_ids | boost_lr | base_lr | mode
 declare -a EXPS=(
-    "1|5|$TOP5|2e-6|1e-6"
-    "2|1|$TOP1|2e-6|1e-6"
-    "3|10|$TOP10|2e-6|1e-6"
-    "4|15|$TOP15|2e-6|1e-6"
+    "1|5|$TOP5|2e-6|1e-6|boost"
+    "2|1|$TOP1|2e-6|1e-6|boost"
+    "3|10|$TOP10|2e-6|1e-6|boost"
+    "4|5|$TOP5|2e-6|1e-6|only"
+    "5|10|$TOP10|2e-6|1e-6|only"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
 echo "  Boost sweep: $MODEL_SHORT on NuminaMath-CoT  ($TOTAL exp sequential)"
-echo "  Base LR = 1e-6, boost LR = 2e-6"
-echo "  Top N ∈ {5, 1, 10, 15} — order: top5 first (main), then top1, top10, top15"
+echo "  Boost variants:  base_lr=1e-6 + boost_lr=2e-6 on top-N (3 exp)"
+echo "  Train-only:      LR=2e-6 on top-N, freeze the rest      (2 exp)"
+echo "  Top N ∈ {5, 1, 10}"
 echo "  GPUs: $GPUS ($NGPUS) | epochs=2"
 echo "============================================================"
 
 for row in "${EXPS[@]}"; do
-    IFS='|' read -r EXP_NUM TOP_N LAYER_IDS BOOST_LR BASE_LR <<< "$row"
-    EXP_NAME="${DATE}_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
+    IFS='|' read -r EXP_NUM TOP_N LAYER_IDS BOOST_LR BASE_LR MODE <<< "$row"
+    if [[ "$MODE" == "only" ]]; then
+        EXP_NAME="${DATE}_exp${EXP_NUM}_only_top${TOP_N}_${MODEL_SHORT}_numina_cot_lr${BOOST_LR}"
+    else
+        EXP_NAME="${DATE}_exp${EXP_NUM}_boost_top${TOP_N}_${MODEL_SHORT}_numina_cot_bst${BOOST_LR}_base${BASE_LR}"
+    fi
     if should_run $EXP_NUM; then
-        run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR"
+        run_train "$EXP_NAME" "$LAYER_IDS" "$BOOST_LR" "$BASE_LR" "$MODE"
         echo "  [$EXP_NUM/$TOTAL] Done.  Cleaning up ray/vllm before next exp..."
         # Safe to use node-wide since we're the only job running on this node
         ray stop --force 2>/dev/null || true
