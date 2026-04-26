@@ -38,8 +38,8 @@ WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
 WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
 WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval_boost_math}"
 
-# Math-only benchmarks
-BENCHMARKS="math500 gsm8k amc aime2024 aime2025 olympiadbench mgsm"
+# Math-only benchmarks (AIME excluded)
+BENCHMARKS="math500 gsm8k amc olympiadbench mgsm"
 
 # Generation params
 TEMPERATURE=0.6
@@ -48,8 +48,8 @@ TOP_K=20
 MAX_TOKENS_LIST="3072 8192"
 SEED=42
 
-# average@N for competition benchmarks
-AVG_AT_MAP="amc:32,aime2024:32,aime2025:32"
+# average@N for competition benchmarks (AMC only since AIME is dropped)
+AVG_AT_MAP="amc:32"
 
 # Parsing
 DRY_RUN=false
