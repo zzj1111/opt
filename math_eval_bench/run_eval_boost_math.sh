@@ -15,8 +15,12 @@
 #   bash run_eval_boost_math.sh --gpus 0,1,2,3        # Use specific GPUs
 #   bash run_eval_boost_math.sh --ckpt-root /path     # Override checkpoint dir
 #   bash run_eval_boost_math.sh --no-tmux             # Skip tmux auto-launch
-#   bash run_eval_boost_math.sh --max-tokens "3072"   # Only 3k (default: "3072 8192")
+#   bash run_eval_boost_math.sh --max-tokens "3072"   # Only 3k (default: "8192")
+#   bash run_eval_boost_math.sh --temperature 0.6     # Override temperature (default: 0.7)
 #   bash run_eval_boost_math.sh --pattern "*boost*"   # Override match glob
+#
+# Output dir / wandb run-name include a temperature tag (t07, t06, ...) so
+# repeated runs at different T do not overwrite each other.
 
 set -uo pipefail
 
@@ -42,7 +46,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval_boost_math}"
 BENCHMARKS="math500 gsm8k amc olympiadbench mgsm"
 
 # Generation params
-TEMPERATURE=0.6
+TEMPERATURE=0.7
 TOP_P=0.95
 TOP_K=20
 MAX_TOKENS_LIST="8192"
@@ -67,9 +71,13 @@ while [[ $# -gt 0 ]]; do
         --wandb-project)   WANDB_PROJECT="$2"; shift 2 ;;
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
         --max-tokens)      MAX_TOKENS_LIST="$2"; shift 2 ;;
+        --temperature)     TEMPERATURE="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+# Tag temperature so T=0.7 results don't overwrite T=0.6 etc.
+T_TAG="t$(echo "$TEMPERATURE" | tr -d '.')"
 
 # ========== Tmux auto-launch ==========
 if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
@@ -82,6 +90,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --wandb-project $(printf '%q' "$WANDB_PROJECT")"
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
+    FULL_ARGS="$FULL_ARGS --temperature $(printf '%q' "$TEMPERATURE")"
     $DRY_RUN && FULL_ARGS="$FULL_ARGS --dry-run"
     [[ -n "$BENCHMARKS" ]] && FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
@@ -181,7 +190,7 @@ for d in "$CKPT_ROOT"/$PATTERN; do
         tok_tag="$mt"
         [[ "$mt" == "3072" ]] && tok_tag="3k"
         [[ "$mt" == "8192" ]] && tok_tag="8k"
-        output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}"
+        output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}_${T_TAG}"
         if [[ -f "$output_dir/overall_summary.json" ]]; then
             continue
         fi
@@ -202,7 +211,7 @@ echo "  Max tokens:    $MAX_TOKENS_LIST"
 echo "  Benchmarks:    $BENCHMARKS"
 echo "  Avg@N:         $AVG_AT_MAP"
 echo "  GPUs:          ${GPU_LIST[*]} ($NUM_GPUS workers, TP=1)"
-echo "  Params:        T=$TEMPERATURE P=$TOP_P K=$TOP_K"
+echo "  Params:        T=$TEMPERATURE ($T_TAG) P=$TOP_P K=$TOP_K"
 echo "  WandB:         $WANDB_ENTITY / $WANDB_PROJECT"
 echo "  Results:       $RESULTS_BASE"
 echo "============================================================"
@@ -219,7 +228,7 @@ fi
 if $DRY_RUN; then
     echo "[DRY RUN] Would evaluate:"
     while IFS='|' read -r path name mt tok; do
-        echo "  $name ($tok)  ->  $path"
+        echo "  ${name}_${tok}_${T_TAG}  ->  $path"
     done < "$QUEUE_FILE"
     echo ""
     echo "Total: $TOTAL_TASKS tasks"
@@ -250,7 +259,7 @@ worker() {
         [[ -z "$task" ]] && break
 
         IFS='|' read -r model_path exp_name max_tokens tok_tag <<< "$task"
-        local run_label="${exp_name}_${tok_tag}"
+        local run_label="${exp_name}_${tok_tag}_${T_TAG}"
         local output_dir="$RESULTS_BASE/${run_label}"
         local log_file="$LOG_DIR/${run_label}.log"
 
