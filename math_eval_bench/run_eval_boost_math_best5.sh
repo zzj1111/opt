@@ -56,6 +56,11 @@ TOP_K=20
 MAX_TOKENS_LIST="8192"
 SEEDS=(42 142 242 342 442)            # 5 seeds → 5 evaluation runs per ckpt
 
+# vLLM safety knobs (avoid 8-worker init contention / OOM)
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.80}"  # was 0.90 — too aggressive on shared boxes
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"  # cap context to (prompt 1024 + response 8192) + margin
+WORKER_START_STAGGER_SEC="${WORKER_START_STAGGER_SEC:-15}"  # avoid 8 simultaneous CUDA inits
+
 # average@N for competition benchmarks
 AVG_AT_MAP="amc:32"
 
@@ -278,7 +283,8 @@ worker() {
             --benchmarks $BENCHMARKS \
             --tensor-parallel-size 1 \
             --dtype auto \
-            --gpu-memory-utilization 0.90 \
+            --gpu-memory-utilization "$GPU_MEM_UTIL" \
+            --max-model-len "$MAX_MODEL_LEN" \
             --max-tokens "$max_tokens" \
             --temperature $TEMPERATURE \
             --top-p $TOP_P \
@@ -304,10 +310,15 @@ worker() {
 # ========== Launch workers ==========
 if ! $REPORT_ONLY && [[ $TOTAL_TASKS -gt 0 ]]; then
     WORKER_PIDS=()
+    idx=0
     for gpu_id in "${GPU_LIST[@]}"; do
+        if (( idx > 0 && WORKER_START_STAGGER_SEC > 0 )); then
+            sleep "$WORKER_START_STAGGER_SEC"      # stagger CUDA inits
+        fi
         worker "$gpu_id" &
         WORKER_PIDS+=($!)
-        echo "Worker launched on GPU $gpu_id (PID $!)"
+        echo "Worker launched on GPU $gpu_id (PID $!)  [stagger: ${WORKER_START_STAGGER_SEC}s]"
+        idx=$((idx + 1))
     done
     for pid in "${WORKER_PIDS[@]}"; do wait "$pid" || true; done
     echo ""
