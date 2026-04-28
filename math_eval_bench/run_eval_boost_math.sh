@@ -1,24 +1,26 @@
 #!/bin/bash
 # ==============================================================================
-# One-click MATH evaluation of all *boost* checkpoints (Worker Mode)
+# One-click MATH evaluation of *boost* / *worst* / *only* checkpoints (Worker Mode)
 # ==============================================================================
 #
-# Auto-discovers any checkpoint under CKPT_ROOT whose name contains "boost",
-# resolves its model path, and runs only the math benchmarks.
+# Auto-discovers any checkpoint under CKPT_ROOT whose name matches any of the
+# comma-separated globs in PATTERN (default: *boost*,*worst*,*only*),
+# resolves its model path, and runs only the math benchmarks (AIME/MGSM excluded).
 #
 # Worker mode: each GPU independently pulls tasks from a shared queue.
 # Auto-launches tmux + activates conda + logs to WandB.
 #
 # Usage:
-#   bash run_eval_boost_math.sh                       # Run all *boost* models
-#   bash run_eval_boost_math.sh --dry-run             # Preview what would run
-#   bash run_eval_boost_math.sh --gpus 0,1,2,3        # Use specific GPUs
-#   bash run_eval_boost_math.sh --ckpt-root /path     # Override checkpoint dir
-#   bash run_eval_boost_math.sh --no-tmux             # Skip tmux auto-launch
-#   bash run_eval_boost_math.sh --max-tokens "3072"   # Only 3k (default: "8192")
-#   bash run_eval_boost_math.sh --temperature 0.6     # Override temperature (default: 0.7)
-#   bash run_eval_boost_math.sh --pattern "*boost*"   # Override match glob
-#   bash run_eval_boost_math.sh --force               # Re-run even if outputs exist
+#   bash run_eval_boost_math.sh                          # All *boost*,*worst*,*only*
+#   bash run_eval_boost_math.sh --dry-run                # Preview what would run
+#   bash run_eval_boost_math.sh --gpus 0,1,2,3           # Use specific GPUs
+#   bash run_eval_boost_math.sh --ckpt-root /path        # Override checkpoint dir
+#   bash run_eval_boost_math.sh --no-tmux                # Skip tmux auto-launch
+#   bash run_eval_boost_math.sh --max-tokens "3072"      # Only 3k (default: "8192")
+#   bash run_eval_boost_math.sh --temperature 0.6        # Override temperature (default: 0.7)
+#   bash run_eval_boost_math.sh --pattern "*boost*"      # Single glob
+#   bash run_eval_boost_math.sh --pattern "*foo*,*bar*"  # Multiple globs (OR)
+#   bash run_eval_boost_math.sh --force                  # Re-run even if outputs exist
 #
 # Output dir / wandb run-name include a temperature tag (t07, t06, ...) so
 # repeated runs at different T do not overwrite each other.
@@ -29,7 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ========== Configuration ==========
 CKPT_ROOT="${CKPT_ROOT:-/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints}"
-PATTERN="*boost*"
+# Comma-separated globs. A directory matches if it satisfies ANY of them.
+PATTERN="*boost*,*worst*,*only*"
 GPUS="0,1,2,3,4,5,6,7"
 RESULTS_BASE="$SCRIPT_DIR/results"
 LOG_DIR="$SCRIPT_DIR/logs/eval_boost_math"
@@ -43,8 +46,8 @@ WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
 WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
 WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval_boost_math}"
 
-# Math-only benchmarks (AIME excluded)
-BENCHMARKS="math500 gsm8k amc olympiadbench mgsm"
+# Math-only benchmarks (AIME and MGSM excluded)
+BENCHMARKS="math500 gsm8k amc olympiadbench"
 
 # Generation params
 TEMPERATURE=0.7
@@ -180,29 +183,40 @@ shopt -s nullglob
 SKIPPED_NO_MODEL=()
 SKIPPED_ALREADY_DONE=()
 MATCHED_DIRS=0
+declare -A SEEN_DIRS
 > "$QUEUE_FILE"
-for d in "$CKPT_ROOT"/$PATTERN; do
-    [[ -d "$d" ]] || continue
-    exp_name=$(basename "$d")
-    [[ "$exp_name" == .* ]] && continue
-    MATCHED_DIRS=$((MATCHED_DIRS + 1))
 
-    model_path=$(resolve_model_path "$d")
-    if [[ -z "$model_path" ]]; then
-        SKIPPED_NO_MODEL+=("$exp_name")
-        continue
-    fi
+# Iterate over each comma-separated glob and union the matched dirs.
+IFS=',' read -ra PATTERN_LIST <<< "$PATTERN"
+for pat in "${PATTERN_LIST[@]}"; do
+    pat=$(echo "$pat" | xargs)   # trim whitespace
+    [[ -z "$pat" ]] && continue
+    for d in "$CKPT_ROOT"/$pat; do
+        [[ -d "$d" ]] || continue
+        exp_name=$(basename "$d")
+        [[ "$exp_name" == .* ]] && continue
+        # Dedupe: a name like *boost*worst* would match multiple globs
+        [[ -n "${SEEN_DIRS[$exp_name]:-}" ]] && continue
+        SEEN_DIRS[$exp_name]=1
+        MATCHED_DIRS=$((MATCHED_DIRS + 1))
 
-    for mt in $MAX_TOKENS_LIST; do
-        tok_tag="$mt"
-        [[ "$mt" == "3072" ]] && tok_tag="3k"
-        [[ "$mt" == "8192" ]] && tok_tag="8k"
-        output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}_${T_TAG}"
-        if [[ -f "$output_dir/overall_summary.json" ]] && ! $FORCE; then
-            SKIPPED_ALREADY_DONE+=("${exp_name}_${tok_tag}_${T_TAG}")
+        model_path=$(resolve_model_path "$d")
+        if [[ -z "$model_path" ]]; then
+            SKIPPED_NO_MODEL+=("$exp_name")
             continue
         fi
-        echo "$model_path|$exp_name|$mt|$tok_tag" >> "$QUEUE_FILE"
+
+        for mt in $MAX_TOKENS_LIST; do
+            tok_tag="$mt"
+            [[ "$mt" == "3072" ]] && tok_tag="3k"
+            [[ "$mt" == "8192" ]] && tok_tag="8k"
+            output_dir="$RESULTS_BASE/${exp_name}_${tok_tag}_${T_TAG}"
+            if [[ -f "$output_dir/overall_summary.json" ]] && ! $FORCE; then
+                SKIPPED_ALREADY_DONE+=("${exp_name}_${tok_tag}_${T_TAG}")
+                continue
+            fi
+            echo "$model_path|$exp_name|$mt|$tok_tag" >> "$QUEUE_FILE"
+        done
     done
 done
 shopt -u nullglob
