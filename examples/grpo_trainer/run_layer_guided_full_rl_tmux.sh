@@ -48,9 +48,13 @@ MODEL="Qwen/Qwen3-1.7B-Base"
 GPUS="0,1,2,3,4,5,6,7"
 CKPT_ROOT="${CKPT_ROOT:-$PROJ_DIR/checkpoints}"
 DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
+EVAL_DIR="$PROJ_DIR/math_eval_bench"
+EVAL_RESULTS_BASE="$EVAL_DIR/results"
+EVAL_WANDB_PROJECT="verl_grpo_layer_guided_eval"
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
 NUM_LAYERS=28
+RUN_EVAL_AFTER_TRAIN=true   # set to false / pass --no-eval to disable per-run eval
 
 # Layer rankings — Qwen3-1.7B-Base 8K eval, math_avg (no AIME)
 TOP5="10,9,16,12,13"
@@ -83,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --no-dummy)          NO_DUMMY=true; shift ;;
         --only-top5-ckpt)    ONLY_TOP5_CKPT="$2"; shift 2 ;;
         --only-top10-ckpt)   ONLY_TOP10_CKPT="$2"; shift 2 ;;
+        --no-eval)           RUN_EVAL_AFTER_TRAIN=false; shift ;;
         *)                   EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -244,6 +249,130 @@ cleanup_between_runs() {
     sleep 25
 }
 
+# eval_ckpt EXP_NAME — runs math500/gsm8k/olympiadbench/amc on the just-trained
+# checkpoint, parallelised across 4 GPUs (one bench per GPU).
+# Output: $EVAL_RESULTS_BASE/${EXP_NAME}_8k_t06/
+eval_ckpt() {
+    $RUN_EVAL_AFTER_TRAIN || return 0
+    local exp_name="$1"
+    [[ -z "$exp_name" ]] && return 0
+
+    local exp_dir="$CKPT_ROOT/$exp_name"
+    [[ -d "$exp_dir" ]] || { echo "  [eval] skipped — exp dir missing: $exp_dir"; return 0; }
+
+    # Resolve latest global_step_*/actor/huggingface
+    local model_path="" best_num=-1
+    for step_dir in "$exp_dir"/global_step_*; do
+        [[ -d "$step_dir" ]] || continue
+        local num="${step_dir##*global_step_}"
+        [[ "$num" =~ ^[0-9]+$ ]] || continue
+        if [[ -f "$step_dir/actor/huggingface/config.json" ]] && (( num > best_num )); then
+            model_path="$step_dir/actor/huggingface"
+            best_num=$num
+        fi
+    done
+    if [[ -z "$model_path" ]]; then
+        echo "  [eval] skipped — no completed global_step_*/actor/huggingface under $exp_dir"
+        return 0
+    fi
+
+    local out_root="$EVAL_RESULTS_BASE/${exp_name}_8k_t06"
+    if [[ -f "$out_root/overall_summary.json" ]]; then
+        echo "  [eval] already done: $out_root"
+        return 0
+    fi
+    mkdir -p "$out_root"
+
+    echo ""
+    echo "  ---- eval $exp_name (4 benchmarks parallel on GPU 0-3, T=0.6, 8K) ----"
+    echo "  model_path: $model_path"
+    echo "  out_root  : $out_root"
+
+    # Use only the first 4 entries of $GPUS for the 4 benchmarks
+    IFS=',' read -ra GPU_LIST_LOCAL <<< "$GPUS"
+    local benches=(math500 gsm8k olympiadbench amc)
+    local avgs=("" "" "" "amc:32")
+    local pids=()
+    for i in 0 1 2 3; do
+        local b="${benches[$i]}"
+        local avg_n="${avgs[$i]}"
+        local g="${GPU_LIST_LOCAL[$i]:-$i}"
+        local extra=()
+        [[ -n "$avg_n" ]] && extra=(--avg-at-map "$avg_n")
+        local log_file="$out_root/${b}.log"
+        (
+            CUDA_VISIBLE_DEVICES="$g" \
+            VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}" \
+            python3 "$EVAL_DIR/eval.py" \
+                --backend vllm \
+                --model "$model_path" \
+                --benchmarks "$b" \
+                --tensor-parallel-size 1 \
+                --dtype auto \
+                --gpu-memory-utilization 0.85 \
+                --max-tokens 8192 \
+                --temperature 0.6 \
+                --top-p 0.95 \
+                --top-k 20 \
+                --seed 42 \
+                "${extra[@]}" \
+                --wandb-project "$EVAL_WANDB_PROJECT" \
+                --wandb-entity "${WANDB_ENTITY:-mhong-university-of-minnesota}" \
+                --wandb-run-name "${exp_name}_${b}_t06" \
+                --output-dir "$out_root" \
+                > "$log_file" 2>&1
+        ) &
+        pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" || true; done
+
+    # Merge per-benchmark summaries into one overall_summary.json so the
+    # skip-check on re-run honours "fully evaluated".
+    python3 - "$out_root" "${benches[@]}" <<'PY'
+import json, os, sys
+root, *benches = sys.argv[1], *sys.argv[2:]
+combined = {"benchmarks": []}
+for b in benches:
+    s = os.path.join(root, b, "summary.json")
+    if not os.path.exists(s):
+        print(f"  [eval merge] missing {s}", flush=True)
+        continue
+    d = json.load(open(s))
+    if isinstance(d, dict) and ("name" in d or "accuracy" in d):
+        combined["benchmarks"].append(d)
+    elif isinstance(d, dict) and "benchmarks" in d:
+        combined["benchmarks"].extend(d["benchmarks"])
+out = os.path.join(root, "overall_summary.json")
+with open(out, "w") as f:
+    json.dump(combined, f, indent=2)
+print(f"  [eval] merged {len(combined['benchmarks'])} benches -> {out}")
+PY
+
+    # Print quick scores
+    python3 - "$out_root" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+p = os.path.join(root, "overall_summary.json")
+try:
+    d = json.load(open(p))
+except Exception as e:
+    print(f"  [eval] cannot read {p}: {e}")
+    raise SystemExit
+items = d.get("benchmarks", [])
+parts = []
+total = 0; n = 0
+for it in items:
+    name = it.get("name") or it.get("benchmark") or "?"
+    acc = it.get("accuracy")
+    if isinstance(acc, (int, float)):
+        parts.append(f"{name}={acc:.4f}")
+        total += acc; n += 1
+ma = total / n if n else 0
+print(f"  [eval] {' '.join(parts)}  | math_avg={ma:.4f}")
+PY
+    echo ""
+}
+
 should_run() {
     local n=$1
     if [[ -n "$ONLY" ]]; then echo "$ONLY" | tr ',' '\n' | grep -qx "$n"; else [[ $n -gt $SKIP ]]; fi
@@ -277,6 +406,7 @@ should_run 1 && {
     echo "============================================================"
     run_train "$EXP_NAME" "" "1e-6" "$TRAIN_NOT_WORST5" "" ""
     cleanup_between_runs
+    eval_ckpt "$EXP_NAME"
 }
 
 # A2: freeze WORST10, full RL @ 1e-6
@@ -288,6 +418,7 @@ should_run 2 && {
     echo "============================================================"
     run_train "$EXP_NAME" "" "1e-6" "$TRAIN_NOT_WORST10" "" ""
     cleanup_between_runs
+    eval_ckpt "$EXP_NAME"
 }
 
 # C1: warm-start from only-top5 -> full RL @ 5e-7
@@ -302,6 +433,7 @@ should_run 3 && {
         echo "============================================================"
         run_train "$EXP_NAME" "$ONLY_TOP5_CKPT" "5e-7" "" "" ""
         cleanup_between_runs
+        eval_ckpt "$EXP_NAME"
     fi
 }
 
@@ -317,6 +449,7 @@ should_run 4 && {
         echo "============================================================"
         run_train "$EXP_NAME" "$ONLY_TOP10_CKPT" "5e-7" "" "" ""
         cleanup_between_runs
+        eval_ckpt "$EXP_NAME"
     fi
 }
 
@@ -329,6 +462,7 @@ should_run 5 && {
     echo "============================================================"
     run_train "$EXP_NAME" "" "1e-6" "$TRAIN_NOT_WORST5" "$TOP5" "2e-6"
     cleanup_between_runs
+    eval_ckpt "$EXP_NAME"
 }
 
 if $DRY_RUN; then
@@ -369,5 +503,6 @@ while true; do
         echo "============================================================"
         run_train "$DUMMY_NAME" "" "$LR" "$TRAIN_NOT_WORST5" "" "" || true
         cleanup_between_runs
+        eval_ckpt "$DUMMY_NAME"
     done
 done
