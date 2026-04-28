@@ -189,6 +189,9 @@ run_train() {
     export WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
     export WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
     export VERL_DEFAULT_LOCAL_DIR="$CKPT_ROOT/$EXP_NAME"
+    # Avoid flashinfer JIT (broken ninja build on this box) — fall back to torch sampler.
+    export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+    export VLLM_USE_V1="${VLLM_USE_V1:-1}"
     python3 -m verl.trainer.main_ppo \
         algorithm.adv_estimator=grpo \
         "data.train_files='$DATA_DIR/train.parquet'" \
