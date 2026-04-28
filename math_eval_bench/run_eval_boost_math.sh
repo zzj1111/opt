@@ -17,7 +17,7 @@
 #   bash run_eval_boost_math.sh --ckpt-root /path        # Override checkpoint dir
 #   bash run_eval_boost_math.sh --no-tmux                # Skip tmux auto-launch
 #   bash run_eval_boost_math.sh --max-tokens "3072"      # Only 3k (default: "8192")
-#   bash run_eval_boost_math.sh --temperature 0.6        # Override temperature (default: 0.7)
+#   bash run_eval_boost_math.sh --temperature 0.7        # Override temperature (default: 0.6)
 #   bash run_eval_boost_math.sh --pattern "*boost*"      # Single glob
 #   bash run_eval_boost_math.sh --pattern "*foo*,*bar*"  # Multiple globs (OR)
 #   bash run_eval_boost_math.sh --force                  # Re-run even if outputs exist
@@ -50,7 +50,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval_boost_math}"
 BENCHMARKS="math500 gsm8k amc olympiadbench"
 
 # Generation params
-TEMPERATURE=0.7
+TEMPERATURE=0.6
 TOP_P=0.95
 TOP_K=20
 MAX_TOKENS_LIST="8192"
