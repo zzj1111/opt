@@ -40,7 +40,7 @@ CKPT_ROOT="$PROJ_DIR/checkpoints"
 DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
-SKIP=0; ONLY=""; NO_TMUX=false; EXTRA_ARGS=()
+SKIP=0; ONLY=""; NO_TMUX=false; NO_DUMMY=false; EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -51,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --skip)       SKIP="$2"; shift 2 ;;
         --only)       ONLY="$2"; shift 2 ;;
         --no-tmux)    NO_TMUX=true; shift ;;
+        --no-dummy)   NO_DUMMY=true; shift ;;
         *)            EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -60,6 +61,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="--no-tmux --gpus $(printf '%q' "$GPUS") --model $(printf '%q' "$MODEL") --ckpt-root $(printf '%q' "$CKPT_ROOT") --data-dir $(printf '%q' "$DATA_DIR")"
     [[ $SKIP -gt 0 ]] && FULL_ARGS="$FULL_ARGS --skip $SKIP"
     [[ -n "$ONLY" ]] && FULL_ARGS="$FULL_ARGS --only $(printf '%q' "$ONLY")"
+    $NO_DUMMY && FULL_ARGS="$FULL_ARGS --no-dummy"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
     tmux new-session -d -s "$TMUX_SESSION" \
         "source $CONDA_INIT && conda activate $CONDA_ENV_PATH && cd $PROJ_DIR && bash $SCRIPT_DIR/$SCRIPT_NAME $FULL_ARGS; exec bash"
@@ -201,3 +203,36 @@ for row in "${EXPS[@]}"; do
 done
 
 echo ""; echo "  Sweep complete!"
+
+# ---------------- Dummy LR-sweep loop (keep GPUs busy) ----------------
+if $NO_DUMMY; then
+    echo "  --no-dummy set, exiting."
+    exit 0
+fi
+
+# Cycles top5 boost (the strongest single config) at varying boost_lr.
+# Other layers stay at base_lr=1e-6. Free LR-sensitivity sweep on top5 boost.
+DUMMY_LRS=(1e-6 1.5e-6 2.5e-6 3e-6 5e-6)
+echo ""
+echo "============================================================"
+echo "  Dummy loop: cycle top5 boost at boost_lr ∈ {${DUMMY_LRS[*]}} forever."
+echo "  TOP5 layers: $TOP5"
+echo "  Stop: tmux kill-session, pkill main_ppo, or Ctrl+C."
+echo "============================================================"
+
+DUMMY_ITER=0
+while true; do
+    for BLR in "${DUMMY_LRS[@]}"; do
+        DUMMY_ITER=$((DUMMY_ITER + 1))
+        DUMMY_NAME="$(date +%m%d_%H%M)_dummy${DUMMY_ITER}_boost_top5_${MODEL_SHORT}_numina_cot_bst${BLR}_base1e-6"
+        echo ""
+        echo "============================================================"
+        echo "  Dummy iter $DUMMY_ITER  boost_lr=$BLR  →  $DUMMY_NAME"
+        echo "============================================================"
+        run_train "$DUMMY_NAME" "$TOP5" "$BLR" "1e-6" "boost" || true
+        ray stop --force 2>/dev/null || true
+        pkill -9 -f main_ppo 2>/dev/null || true
+        pkill -9 -f vllm 2>/dev/null || true
+        sleep 25
+    done
+done
