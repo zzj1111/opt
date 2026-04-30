@@ -1,28 +1,31 @@
 #!/bin/bash
 # ==============================================================================
-# Qwen3-4B-Base — simplest boost / only sweep (4 experiments, 8 GPUs)
+# Qwen3-4B-Base — simple boost / only / worst sweep (8 experiments, 8 GPUs)
 # ==============================================================================
 #
-# Just 4 experiments (top5 / top10  ×  boost / only).
-# No worst-N ablation, no top1 / top15. Run back-to-back.
+# Mirrors top with worst (top5/top10 × boost/only, then worst5/worst10 × boost/only).
 #
-#   1. top5  boost   (16/14/19/22/17)                base_lr=1e-6  boost_lr=2e-6
-#   2. top10 boost   (16/14/19/22/17/15/12/18/20/10) base_lr=1e-6  boost_lr=2e-6
-#   3. top5  only    (same TOP5 set, freeze rest)    lr=2e-6
-#   4. top10 only    (same TOP10 set, freeze rest)   lr=2e-6
+#   1. top5    boost   (16/14/19/22/17)                base_lr=1e-6  boost_lr=2e-6
+#   2. top10   boost   (16/14/19/22/17/15/12/18/20/10) base_lr=1e-6  boost_lr=2e-6
+#   3. top5    only    (same TOP5 set, freeze rest)    lr=2e-6
+#   4. top10   only    (same TOP10 set, freeze rest)   lr=2e-6
+#   5. worst5  boost   (2/3/1/30/32)                   base_lr=1e-6  boost_lr=2e-6
+#   6. worst10 boost   (2/3/1/30/32/29/27/33/4/28)     base_lr=1e-6  boost_lr=2e-6
+#   7. worst5  only    (WORST5 set, freeze rest)       lr=2e-6
+#   8. worst10 only    (WORST10 set, freeze rest)      lr=2e-6
 #
 # Layer ranking source — Qwen3-4B-Base 8K eval, math_avg (no AIME):
 #   /home/zha00175/csvdoc/wandb_opt_rl_eval_analysis_final.xlsx
 #   Full RL math_avg = 0.6365  (highest single layer L16 = 0.6432)
-#   Sweet spot L10-L22 (mid-band).
+#   Sweet spot L10-L22 (mid-band).  Worst tails: L1-L4 + L27-L33.
 #
 # batch=512, mini=128, micro=8, epochs=2, max_response=3072.
 # 8 GPUs (default 0-7), runs one exp at a time.
 #
 # Usage:
 #   bash run_4b_base_simple_boost_only_tmux.sh
-#   bash run_4b_base_simple_boost_only_tmux.sh --skip 2     # skip first 2
-#   bash run_4b_base_simple_boost_only_tmux.sh --only 1,3   # run only listed
+#   bash run_4b_base_simple_boost_only_tmux.sh --skip 4     # skip top phases
+#   bash run_4b_base_simple_boost_only_tmux.sh --only 1,5   # 1 top + 1 worst
 #   bash run_4b_base_simple_boost_only_tmux.sh --no-tmux
 
 set -uo pipefail
@@ -148,6 +151,8 @@ should_run() {
 # Layer rankings for Qwen3-4B-Base (math_avg from 8K eval, full RL = 0.6365)
 TOP5="16,14,19,22,17"
 TOP10="16,14,19,22,17,15,12,18,20,10"
+WORST5="2,3,1,30,32"
+WORST10="2,3,1,30,32,29,27,33,4,28"
 
 #   exp_num | tag | N | layer_ids | boost_lr | base_lr | mode | layer_kind
 declare -a EXPS=(
@@ -155,17 +160,25 @@ declare -a EXPS=(
     "2|top|10|$TOP10|2e-6|1e-6|boost|top"
     "3|top|5|$TOP5|2e-6|1e-6|only|top"
     "4|top|10|$TOP10|2e-6|1e-6|only|top"
+    "5|wst|5|$WORST5|2e-6|1e-6|boost|worst"
+    "6|wst|10|$WORST10|2e-6|1e-6|boost|worst"
+    "7|wst|5|$WORST5|2e-6|1e-6|only|worst"
+    "8|wst|10|$WORST10|2e-6|1e-6|only|worst"
 )
 
 TOTAL=${#EXPS[@]}
 echo "============================================================"
 echo "  Simple sweep: $MODEL_SHORT on NuminaMath-CoT  ($TOTAL exp sequential)"
-echo "  1. top5  boost   base_lr=1e-6 + boost_lr=2e-6"
-echo "  2. top10 boost   base_lr=1e-6 + boost_lr=2e-6"
-echo "  3. top5  only    lr=2e-6"
-echo "  4. top10 only    lr=2e-6"
+echo "  1. top5    boost   base_lr=1e-6 + boost_lr=2e-6"
+echo "  2. top10   boost   base_lr=1e-6 + boost_lr=2e-6"
+echo "  3. top5    only    lr=2e-6"
+echo "  4. top10   only    lr=2e-6"
+echo "  5. worst5  boost   base_lr=1e-6 + boost_lr=2e-6"
+echo "  6. worst10 boost   base_lr=1e-6 + boost_lr=2e-6"
+echo "  7. worst5  only    lr=2e-6"
+echo "  8. worst10 only    lr=2e-6"
 echo "  GPUs: $GPUS ($NGPUS) | epochs=2"
-echo "  Use --skip N or --only 1,3 to control which exps run."
+echo "  Use --skip N or --only 1,3,5 to control which exps run."
 echo "============================================================"
 
 for row in "${EXPS[@]}"; do
