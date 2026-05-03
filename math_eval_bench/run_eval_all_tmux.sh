@@ -19,14 +19,14 @@
 #   bash run_eval_all_tmux.sh --gpus 0,1,2,3        # Use specific GPUs
 #   bash run_eval_all_tmux.sh --ckpt-root /path     # Override checkpoint dir
 #   bash run_eval_all_tmux.sh --no-tmux             # Skip tmux auto-launch
-#   bash run_eval_all_tmux.sh --max-tokens "3072"   # Only 3k (default: "3072 8192")
+#   bash run_eval_all_tmux.sh --max-tokens "3072"   # Only 3k (default: "8192")
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ========== Configuration ==========
-CKPT_ROOT="${CKPT_ROOT:-/apdcephfs_hldy2/share_305110755/hunyuan/rzhu/opt_413/opt/checkpoints}"
+CKPT_ROOT="${CKPT_ROOT:-/apdcephfs_hldy2/share_305110755/hunyuan/rzhu/opt_413/opt_421/checkpoints/}"
 GPUS="0,1,2,3,4,5,6,7"
 RESULTS_BASE="$SCRIPT_DIR/results"
 LOG_DIR="$SCRIPT_DIR/logs/eval_all"
@@ -41,13 +41,13 @@ WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
 WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval_all}"
 
 # Benchmarks — no AIME
-BENCHMARKS="math500 gsm8k mbpp humaneval humaneval_plus livecodebench arc_challenge mmlu_pro bbh mgsm ceval amc olympiadbench gpqa_diamond ifeval"
+BENCHMARKS="mbpp humaneval_plus livecodebench"
 
 # Generation params
 TEMPERATURE=0.6
 TOP_P=0.95
 TOP_K=20
-MAX_TOKENS_LIST="3072 8192"
+MAX_TOKENS_LIST="8192"
 SEED=42
 
 # average@N for remaining competition benchmarks (only AMC since AIME is dropped)
