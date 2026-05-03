@@ -78,9 +78,15 @@ while [[ $# -gt 0 ]]; do
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
         --max-tokens)      MAX_TOKENS_LIST="$2"; shift 2 ;;
         --temperature)     TEMPERATURE="$2"; shift 2 ;;
+        --max-model-len)   MAX_MODEL_LEN="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+# Optional: cap vLLM max_model_len. Crucial for 8B+ models so KV cache profile
+# doesn't try to budget for the model's reported 32K context (causes 5+ min
+# engine_core spawn -> "Engine core initialization failed").
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 
 # Tag temperature so T=0.7 results don't overwrite T=0.6 etc.
 T_TAG="t$(echo "$TEMPERATURE" | tr -d '.')"
@@ -97,6 +103,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
     FULL_ARGS="$FULL_ARGS --temperature $(printf '%q' "$TEMPERATURE")"
+    [[ -n "$MAX_MODEL_LEN" ]] && FULL_ARGS="$FULL_ARGS --max-model-len $(printf '%q' "$MAX_MODEL_LEN")"
     $DRY_RUN && FULL_ARGS="$FULL_ARGS --dry-run"
     $FORCE   && FULL_ARGS="$FULL_ARGS --force"
     [[ -n "$BENCHMARKS" ]] && FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
@@ -306,6 +313,8 @@ worker() {
 
         echo "[GPU $gpu_id] START $run_label"
 
+        local mml_args=()
+        [[ -n "$MAX_MODEL_LEN" ]] && mml_args=(--max-model-len "$MAX_MODEL_LEN")
         if CUDA_VISIBLE_DEVICES="$gpu_id" $PYTHON "$SCRIPT_DIR/eval.py" \
             --backend vllm \
             --model "$model_path" \
@@ -319,6 +328,7 @@ worker() {
             --top-k $TOP_K \
             --seed $SEED \
             --avg-at-map "$AVG_AT_MAP" \
+            "${mml_args[@]}" \
             --wandb-project "$WANDB_PROJECT" \
             --wandb-entity "$WANDB_ENTITY" \
             --wandb-run-name "$run_label" \

@@ -175,9 +175,9 @@ should_run() {
 }
 
 # eval_ckpt EXP_NAME — delegate to the proven run_eval_boost_math.sh worker.
-# No inline vllm logic. The eval script auto-resolves model_path, dispatches
-# via worker mode on the requested GPUs, runs math500/gsm8k/amc/olympiad,
-# uploads to wandb, and skips if results already exist.
+# Passes --max-model-len 16384 so vLLM doesn't try to KV-cache-profile the
+# model's reported 32K context (8B at 32K causes engine_core spawn timeout
+# after 5 min and crashes with "Engine core initialization failed").
 eval_ckpt() {
     $RUN_EVAL_AFTER_TRAIN || return 0
     local exp_name="$1"
@@ -192,6 +192,7 @@ eval_ckpt() {
         --pattern "$exp_name" \
         --wandb-project "$EVAL_WANDB_PROJECT" \
         --gpus "$GPUS" \
+        --max-model-len 16384 \
         || echo "  [eval] returned non-zero (continuing)"
     echo ""
 }
