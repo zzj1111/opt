@@ -250,26 +250,43 @@ eval_ckpt() {
     echo "  model_path: $model_path"
     echo "  out_root  : $out_root"
 
-    # Use only the first 4 entries of $GPUS for the 4 benchmarks
+    # 4 benches × TP=2 = uses all 8 GPUs in $GPUS (slices of 2).
     IFS=',' read -ra GPU_LIST_LOCAL <<< "$GPUS"
+    local n_gpus=${#GPU_LIST_LOCAL[@]}
     local benches=(math500 gsm8k olympiadbench amc)
     local avgs=("" "" "" "amc:32")
+    local n_benches=${#benches[@]}
+    local tp=2
+    if (( n_gpus < n_benches * tp )); then
+        # Fall back to TP=1 if user gave fewer GPUs
+        tp=$(( n_gpus / n_benches ))
+        (( tp < 1 )) && tp=1
+    fi
+    echo "  layout: $n_benches benches × TP=$tp = $((n_benches * tp)) GPU usage"
+
     local pids=()
+    local gpu_idx=0
     for i in 0 1 2 3; do
         local b="${benches[$i]}"
         local avg_n="${avgs[$i]}"
-        local g="${GPU_LIST_LOCAL[$i]:-$i}"
+        # Pull $tp consecutive GPU ids
+        local slice=""
+        for ((j=0; j<tp; j++)); do
+            slice+="${GPU_LIST_LOCAL[$(( (gpu_idx + j) % n_gpus ))]}"
+            (( j < tp - 1 )) && slice+=","
+        done
+        gpu_idx=$(( gpu_idx + tp ))
         local extra=()
         [[ -n "$avg_n" ]] && extra=(--avg-at-map "$avg_n")
         local log_file="$out_root/${b}.log"
         (
-            CUDA_VISIBLE_DEVICES="$g" \
+            CUDA_VISIBLE_DEVICES="$slice" \
             VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}" \
             python3 "$EVAL_DIR/eval.py" \
                 --backend vllm \
                 --model "$model_path" \
                 --benchmarks "$b" \
-                --tensor-parallel-size 1 \
+                --tensor-parallel-size "$tp" \
                 --dtype auto \
                 --gpu-memory-utilization 0.85 \
                 --max-model-len 16384 \

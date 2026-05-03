@@ -68,8 +68,10 @@ MAX_TOKENS_LIST="8192"
 SEED=42
 
 # vLLM sizing for 8B
-TP_SIZE=1            # 1 GPU per worker; one 8B fits comfortably on H100/H200
-GPU_MEM_UTIL=0.85    # 0.85 leaves a bit more headroom than the boost script's 0.90
+# Default: 4 workers each TP=2 (8 GPUs total).  Eases /dev/shm + NCCL pressure
+# vs the prior 8 workers × TP=1 layout that kept tripping engine_core spawn.
+TP_SIZE="${TP_SIZE:-2}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
 # 8B reports max_model_len=32768. KV-cache profiling at 32K causes vLLM v1
 # engine_core spawn to time out after 5 min ("Engine core initialization
 # failed. Failed core proc(s): {}"). Cap to 1024 prompt + 8192 response + margin.
@@ -343,8 +345,10 @@ if [[ $TOTAL_TASKS -eq 0 ]]; then
 fi
 
 # ========== Worker function ==========
+# Each worker owns TP_SIZE GPUs (e.g. "0,1") and runs eval.py with TP=$TP_SIZE.
 worker() {
-    local gpu_id="$1"
+    local gpu_slice="$1"      # e.g. "0,1"
+    local worker_label="$2"   # e.g. "W0"
     local completed=0
     local failed=0
 
@@ -365,11 +369,11 @@ worker() {
         local output_dir="$RESULTS_BASE/${run_label}"
         local log_file="$LOG_DIR/${run_label}.log"
 
-        echo "[GPU $gpu_id] START $run_label"
+        echo "[$worker_label gpus=$gpu_slice] START $run_label"
 
         local mml_args=()
         [[ -n "$MAX_MODEL_LEN" ]] && mml_args=(--max-model-len "$MAX_MODEL_LEN")
-        if CUDA_VISIBLE_DEVICES="$gpu_id" $PYTHON "$SCRIPT_DIR/eval.py" \
+        if CUDA_VISIBLE_DEVICES="$gpu_slice" $PYTHON "$SCRIPT_DIR/eval.py" \
             --backend vllm \
             --model "$model_path" \
             --benchmarks $BENCHMARKS \
@@ -389,22 +393,36 @@ worker() {
             --output-dir "$output_dir" \
             > "$log_file" 2>&1; then
             completed=$((completed + 1))
-            echo "[GPU $gpu_id] DONE  $run_label (worker total: $completed)"
+            echo "[$worker_label gpus=$gpu_slice] DONE  $run_label (worker total: $completed)"
         else
             failed=$((failed + 1))
-            echo "[GPU $gpu_id] FAIL  $run_label — see $log_file"
+            echo "[$worker_label gpus=$gpu_slice] FAIL  $run_label — see $log_file"
         fi
     done
 
-    echo "[GPU $gpu_id] Worker finished. Completed: $completed, Failed: $failed"
+    echo "[$worker_label gpus=$gpu_slice] Worker finished. Completed: $completed, Failed: $failed"
 }
 
 # ========== Launch workers ==========
+# Slice $GPU_LIST into chunks of $TP_SIZE — each chunk is one worker's GPU group.
+if (( NUM_GPUS % TP_SIZE != 0 )); then
+    echo "ERROR: NUM_GPUS=$NUM_GPUS is not divisible by TP_SIZE=$TP_SIZE"
+    exit 1
+fi
+NUM_WORKERS=$((NUM_GPUS / TP_SIZE))
+echo "Worker layout: $NUM_WORKERS workers x TP=$TP_SIZE (= $NUM_GPUS GPUs total)"
+
 WORKER_PIDS=()
-for gpu_id in "${GPU_LIST[@]}"; do
-    worker "$gpu_id" &
+for ((w=0; w<NUM_WORKERS; w++)); do
+    slice=""
+    for ((j=0; j<TP_SIZE; j++)); do
+        idx=$((w * TP_SIZE + j))
+        slice+="${GPU_LIST[$idx]}"
+        (( j < TP_SIZE - 1 )) && slice+=","
+    done
+    worker "$slice" "W$w" &
     WORKER_PIDS+=($!)
-    echo "Worker launched on GPU $gpu_id (PID $!)"
+    echo "Worker W$w launched on GPUs $slice (PID $!)"
 done
 
 for pid in "${WORKER_PIDS[@]}"; do
