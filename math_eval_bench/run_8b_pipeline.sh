@@ -54,18 +54,32 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     $NO_TRAIN && FULL_ARGS="$FULL_ARGS --no-train"
     [[ -n "$EVAL_EXTRA"  ]] && FULL_ARGS="$FULL_ARGS --eval-args $(printf '%q' "$EVAL_EXTRA")"
     [[ -n "$TRAIN_EXTRA" ]] && FULL_ARGS="$FULL_ARGS --train-args $(printf '%q' "$TRAIN_EXTRA")"
+    # Explicitly export WANDB / VLLM env into the inner bash so subscripts
+    # (run_eval_8b_math.sh, run_8b_base_simple_boost_only_tmux.sh) inherit them
+    # even when called with --no-tmux from inside this pipeline tmux.
     tmux new-session -d -s "$SESSION" \
-        "source $CONDA_INIT && conda activate $CONDA_ENV_PATH && \
+        "source $CONDA_INIT && \
+         conda activate $CONDA_ENV_PATH && \
+         export WANDB_API_KEY=${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2} && \
+         export WANDB_ENTITY=${WANDB_ENTITY:-mhong-university-of-minnesota} && \
+         export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0} && \
          cd $SCRIPT_DIR && \
-         bash $SCRIPT_DIR/$(basename "$0") $FULL_ARGS; exec bash"
+         bash $SCRIPT_DIR/$(basename "$0") $FULL_ARGS; \
+         exec bash"
     echo "Tmux '$SESSION' launched. Attach: tmux attach -t $SESSION"
     exit 0
 fi
 
-# Conda is already active inside tmux; activate manually if not (--no-tmux from outside).
+# Conda + env exports defensively re-applied when running inside an
+# existing tmux (--no-tmux from outside). Idempotent.
+export WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
+export WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import vllm" >/dev/null 2>&1; then
     [[ -f "$CONDA_INIT" ]] && source "$CONDA_INIT" && conda activate "$CONDA_ENV_PATH"
 fi
+echo "[setup] python:  $(command -v python3)"
+echo "[setup] vllm:    $(python3 -c 'import vllm; print(vllm.__version__, vllm.__file__)' 2>&1 | head -1)"
 
 # ============================ STEP 1: EVAL ============================
 if $NO_EVAL; then

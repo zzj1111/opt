@@ -87,10 +87,44 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     $RUN_EVAL_AFTER_TRAIN || FULL_ARGS="$FULL_ARGS --no-eval"
     FULL_ARGS="$FULL_ARGS --eval-wandb-project $(printf '%q' "$EVAL_WANDB_PROJECT")"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
+    # Mirror run_eval_boost_math.sh tmux launch: explicitly export
+    # WANDB_API_KEY / WANDB_ENTITY / VLLM_USE_FLASHINFER_SAMPLER so the
+    # inner bash inherits them even if user's .bashrc doesn't get sourced.
     tmux new-session -d -s "$TMUX_SESSION" \
-        "source $CONDA_INIT && conda activate $CONDA_ENV_PATH && cd $PROJ_DIR && bash $SCRIPT_DIR/$SCRIPT_NAME $FULL_ARGS; exec bash"
+        "source $CONDA_INIT && \
+         conda activate $CONDA_ENV_PATH && \
+         export WANDB_API_KEY=${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2} && \
+         export WANDB_ENTITY=${WANDB_ENTITY:-mhong-university-of-minnesota} && \
+         export VLLM_USE_FLASHINFER_SAMPLER=${VLLM_USE_FLASHINFER_SAMPLER:-0} && \
+         cd $PROJ_DIR && \
+         bash $SCRIPT_DIR/$SCRIPT_NAME $FULL_ARGS; \
+         exec bash"
     echo "Tmux '$TMUX_SESSION' started.  Attach: tmux attach -t $TMUX_SESSION"; exit 0
 fi
+
+# ========== Setup (mirrors run_eval_boost_math.sh) ==========
+# These are inherited by all subshells (run_train, eval_ckpt, dummy loop).
+export WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
+export WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
+export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+
+# Body-level conda activation fallback: only triggers if vllm import fails
+# (i.e. we're inside an existing tmux session that didn't activate conda).
+# Idempotent — a no-op when conda is already active. This is the SAME
+# pattern used by run_eval_boost_math.sh and is what makes that script
+# robust when called via --no-tmux from another wrapper.
+if ! python -c "import vllm" >/dev/null 2>&1; then
+    if [[ -f "$CONDA_INIT" ]]; then
+        echo "[setup] Activating conda env: $CONDA_ENV_PATH"
+        # shellcheck disable=SC1090
+        source "$CONDA_INIT"
+        conda activate "$CONDA_ENV_PATH"
+    fi
+fi
+# Sanity-print the python that the rest of the script will use.
+echo "[setup] python:  $(command -v python3)"
+echo "[setup] vllm:    $(python3 -c 'import vllm; print(vllm.__version__, vllm.__file__)' 2>&1 | head -1)"
+echo "[setup] CUDA_VISIBLE_DEVICES from env: ${CUDA_VISIBLE_DEVICES:-<unset>}"
 
 NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 MODEL_SHORT=$(basename "$MODEL")
