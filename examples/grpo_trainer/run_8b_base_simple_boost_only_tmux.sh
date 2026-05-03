@@ -174,16 +174,19 @@ should_run() {
     if [[ -n "$ONLY" ]]; then echo "$ONLY" | tr ',' '\n' | grep -qx "$n"; else [[ $n -gt $SKIP ]]; fi
 }
 
-# eval_ckpt EXP_NAME — single direct call to math_eval_bench/eval.py.
-# No worker mode, no queue, no tmux nesting, no bash layering. Just python.
-# eval.py loads vllm once and runs the 4 benches sequentially internally.
+# eval_ckpt EXP_NAME — runs math500/gsm8k/olympiadbench/amc on the just-trained
+# checkpoint, parallelised across 4 GPUs (one bench per GPU).
+# Output: $EVAL_RESULTS_BASE/${EXP_NAME}_8k_t06/
+# Mirrors run_layer_guided_full_rl_tmux.sh's eval_ckpt verbatim, with the only
+# 8B-specific addition being --max-model-len 16384 (the model reports 32768
+# which makes vLLM v1 KV-cache profile time out at engine_core spawn).
 eval_ckpt() {
     $RUN_EVAL_AFTER_TRAIN || return 0
     local exp_name="$1"
     [[ -z "$exp_name" ]] && return 0
 
     local exp_dir="$CKPT_ROOT/$exp_name"
-    [[ -d "$exp_dir" ]] || { echo "  [eval] skip — $exp_dir missing"; return 0; }
+    [[ -d "$exp_dir" ]] || { echo "  [eval] skipped — exp dir missing: $exp_dir"; return 0; }
 
     # Resolve latest global_step_*/actor/huggingface
     local model_path="" best_num=-1
@@ -197,49 +200,105 @@ eval_ckpt() {
         fi
     done
     if [[ -z "$model_path" ]]; then
-        echo "  [eval] skip — no completed global_step_*/actor/huggingface under $exp_dir"
+        echo "  [eval] skipped — no completed global_step_*/actor/huggingface under $exp_dir"
         return 0
     fi
 
-    local out_dir="$EVAL_RESULTS_BASE/${exp_name}_8k_t06"
-    if [[ -f "$out_dir/overall_summary.json" ]]; then
-        echo "  [eval] already done: $out_dir"
+    local out_root="$EVAL_RESULTS_BASE/${exp_name}_8k_t06"
+    if [[ -f "$out_root/overall_summary.json" ]]; then
+        echo "  [eval] already done: $out_root"
         return 0
     fi
-    mkdir -p "$out_dir"
-    local log_file="$out_dir/eval.log"
-
-    # Use first GPU from $GPUS for the eval (one bench at a time, eval.py loops).
-    local first_gpu
-    first_gpu=$(echo "$GPUS" | cut -d, -f1)
+    mkdir -p "$out_root"
 
     echo ""
-    echo "  ---- eval $exp_name on GPU $first_gpu (T=0.6, max_model_len=16384) ----"
-    echo "  model: $model_path"
-    echo "  out:   $out_dir"
-    echo "  log:   $log_file"
+    echo "  ---- eval $exp_name (4 benchmarks parallel on GPU 0-3, T=0.6, 8K) ----"
+    echo "  model_path: $model_path"
+    echo "  out_root  : $out_root"
 
-    CUDA_VISIBLE_DEVICES="$first_gpu" \
-    python3 "$EVAL_DIR/eval.py" \
-        --backend vllm \
-        --model "$model_path" \
-        --benchmarks math500 gsm8k amc olympiadbench \
-        --tensor-parallel-size 1 \
-        --dtype auto \
-        --gpu-memory-utilization 0.85 \
-        --max-model-len 16384 \
-        --max-tokens 8192 \
-        --temperature 0.6 \
-        --top-p 0.95 \
-        --top-k 20 \
-        --seed 42 \
-        --avg-at-map "amc:32" \
-        --wandb-project "$EVAL_WANDB_PROJECT" \
-        --wandb-entity "${WANDB_ENTITY:-mhong-university-of-minnesota}" \
-        --wandb-run-name "${exp_name}_8k_t06" \
-        --output-dir "$out_dir" \
-        2>&1 | tee "$log_file" \
-        || echo "  [eval] returned non-zero (continuing)"
+    # Use only the first 4 entries of $GPUS for the 4 benchmarks
+    IFS=',' read -ra GPU_LIST_LOCAL <<< "$GPUS"
+    local benches=(math500 gsm8k olympiadbench amc)
+    local avgs=("" "" "" "amc:32")
+    local pids=()
+    for i in 0 1 2 3; do
+        local b="${benches[$i]}"
+        local avg_n="${avgs[$i]}"
+        local g="${GPU_LIST_LOCAL[$i]:-$i}"
+        local extra=()
+        [[ -n "$avg_n" ]] && extra=(--avg-at-map "$avg_n")
+        local log_file="$out_root/${b}.log"
+        (
+            CUDA_VISIBLE_DEVICES="$g" \
+            VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}" \
+            python3 "$EVAL_DIR/eval.py" \
+                --backend vllm \
+                --model "$model_path" \
+                --benchmarks "$b" \
+                --tensor-parallel-size 1 \
+                --dtype auto \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 16384 \
+                --max-tokens 8192 \
+                --temperature 0.6 \
+                --top-p 0.95 \
+                --top-k 20 \
+                --seed 42 \
+                "${extra[@]}" \
+                --wandb-project "$EVAL_WANDB_PROJECT" \
+                --wandb-entity "${WANDB_ENTITY:-mhong-university-of-minnesota}" \
+                --wandb-run-name "${exp_name}_${b}_t06" \
+                --output-dir "$out_root" \
+                > "$log_file" 2>&1
+        ) &
+        pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" || true; done
+
+    # Merge per-benchmark summaries into one overall_summary.json so the
+    # skip-check on re-run honours "fully evaluated".
+    python3 - "$out_root" "${benches[@]}" <<'PY'
+import json, os, sys
+root, *benches = sys.argv[1], *sys.argv[2:]
+combined = {"benchmarks": []}
+for b in benches:
+    s = os.path.join(root, b, "summary.json")
+    if not os.path.exists(s):
+        print(f"  [eval merge] missing {s}", flush=True)
+        continue
+    d = json.load(open(s))
+    if isinstance(d, dict) and ("name" in d or "accuracy" in d):
+        combined["benchmarks"].append(d)
+    elif isinstance(d, dict) and "benchmarks" in d:
+        combined["benchmarks"].extend(d["benchmarks"])
+out = os.path.join(root, "overall_summary.json")
+with open(out, "w") as f:
+    json.dump(combined, f, indent=2)
+print(f"  [eval] merged {len(combined['benchmarks'])} benches -> {out}")
+PY
+
+    # Print quick scores
+    python3 - "$out_root" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+p = os.path.join(root, "overall_summary.json")
+try:
+    d = json.load(open(p))
+except Exception as e:
+    print(f"  [eval] cannot read {p}: {e}")
+    raise SystemExit
+items = d.get("benchmarks", [])
+parts = []
+total = 0; n = 0
+for it in items:
+    name = it.get("name") or it.get("benchmark") or "?"
+    acc = it.get("accuracy")
+    if isinstance(acc, (int, float)):
+        parts.append(f"{name}={acc:.4f}")
+        total += acc; n += 1
+ma = total / n if n else 0
+print(f"  [eval] {' '.join(parts)}  | math_avg={ma:.4f}")
+PY
     echo ""
 }
 
