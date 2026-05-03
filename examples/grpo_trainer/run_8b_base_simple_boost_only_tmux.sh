@@ -42,6 +42,7 @@ DATA_DIR="$PROJ_DIR/data/numina_math_cot_author"
 EVAL_DIR="$PROJ_DIR/math_eval_bench"
 EVAL_RESULTS_BASE="$EVAL_DIR/results"
 EVAL_WANDB_PROJECT="${EVAL_WANDB_PROJECT:-opt_rl_eval_8b_math}"
+EVAL_TP="${EVAL_TP:-2}"             # tensor-parallel size per benchmark; 2 -> uses all 8 GPUs (4 benches x 2 GPU)
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
 TOP5="${TOP5:-}"; TOP10="${TOP10:-}"; WORST5="${WORST5:-}"; WORST10="${WORST10:-}"
@@ -64,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --no-dummy)   NO_DUMMY=true; shift ;;
         --no-eval)    RUN_EVAL_AFTER_TRAIN=false; shift ;;
         --eval-wandb-project) EVAL_WANDB_PROJECT="$2"; shift 2 ;;
+        --eval-tp)    EVAL_TP="$2"; shift 2 ;;
         *)            EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -86,6 +88,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     $NO_DUMMY && FULL_ARGS="$FULL_ARGS --no-dummy"
     $RUN_EVAL_AFTER_TRAIN || FULL_ARGS="$FULL_ARGS --no-eval"
     FULL_ARGS="$FULL_ARGS --eval-wandb-project $(printf '%q' "$EVAL_WANDB_PROJECT")"
+    FULL_ARGS="$FULL_ARGS --eval-tp $(printf '%q' "$EVAL_TP")"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
     tmux new-session -d -s "$TMUX_SESSION" \
         "source $CONDA_INIT && conda activate $CONDA_ENV_PATH && cd $PROJ_DIR && bash $SCRIPT_DIR/$SCRIPT_NAME $FULL_ARGS; exec bash"
@@ -207,20 +210,44 @@ eval_ckpt() {
     fi
     mkdir -p "$out_root"
 
-    echo ""
-    echo "  ---- eval $exp_name (4 benches parallel on 4 GPUs, T=0.6, 8K) ----"
-    echo "  model_path: $model_path"
-    echo "  out_root  : $out_root"
-    echo "  wandb     : $EVAL_WANDB_PROJECT"
-
     IFS=',' read -ra GPU_LIST_LOCAL <<< "$GPUS"
+    local n_gpus=${#GPU_LIST_LOCAL[@]}
     local benches=(math500 gsm8k olympiadbench amc)
     local avgs=("" "" "" "amc:32")
+    local n_benches=${#benches[@]}
+
+    # Pick a feasible TP: must divide $n_gpus and $n_gpus / TP must be >= n_benches
+    # so each of the 4 benches gets its own contiguous GPU slice.
+    local tp="$EVAL_TP"
+    while (( tp > 1 )) && (( n_gpus / tp < n_benches )); do
+        tp=$((tp / 2))
+    done
+    while (( tp > 1 )) && (( n_gpus % tp != 0 )); do
+        tp=$((tp - 1))
+    done
+    (( tp < 1 )) && tp=1
+    local workers_per_round=$(( n_gpus / tp ))
+
+    echo ""
+    echo "  ---- eval $exp_name  (T=0.6, 8K) ----"
+    echo "  model_path:  $model_path"
+    echo "  out_root :   $out_root"
+    echo "  wandb    :   $EVAL_WANDB_PROJECT"
+    echo "  TP=$tp    GPUs=$n_gpus    workers_per_round=$workers_per_round    benches=$n_benches"
+
     local pids=()
+    local gpu_idx=0
     for i in 0 1 2 3; do
         local b="${benches[$i]}"
         local avg_n="${avgs[$i]}"
-        local g="${GPU_LIST_LOCAL[$i]:-$i}"
+        # Slice $tp consecutive GPUs for this bench
+        local slice=()
+        for ((j=0; j<tp; j++)); do
+            slice+=("${GPU_LIST_LOCAL[$(((gpu_idx + j) % n_gpus))]}")
+        done
+        gpu_idx=$(( gpu_idx + tp ))
+        local g
+        g=$(IFS=,; echo "${slice[*]}")
         local extra=()
         [[ -n "$avg_n" ]] && extra=(--avg-at-map "$avg_n")
         local log_file="$out_root/${b}.log"
@@ -231,7 +258,7 @@ eval_ckpt() {
                 --backend vllm \
                 --model "$model_path" \
                 --benchmarks "$b" \
-                --tensor-parallel-size 1 \
+                --tensor-parallel-size "$tp" \
                 --dtype auto \
                 --gpu-memory-utilization 0.85 \
                 --max-tokens 8192 \
