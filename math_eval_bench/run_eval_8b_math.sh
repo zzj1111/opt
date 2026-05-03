@@ -86,7 +86,7 @@ AVG_AT_MAP="amc:32"
 # on the advisor's server (slow / no internet / cache miss).
 # Enable with --include-base AND a local --base-model /path; the HF id is
 # only used as a last resort and will likely hang.
-INCLUDE_BASE=false
+INCLUDE_BASE=true
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-Qwen/Qwen3-8B-Base}"
 BASE_EXP_NAME="Qwen3-8B-Base_baseline"
 
