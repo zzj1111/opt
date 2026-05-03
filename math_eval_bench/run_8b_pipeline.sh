@@ -121,7 +121,9 @@ fi
 echo ""
 echo "============================================================"
 echo "[3/3] TRAIN — boost+only sweep with auto-derived layer sets"
-echo "  Will also kick off dummy LR loop after the 8 main exps."
+echo "  Each ckpt is auto-evaluated immediately after training (-> wandb"
+echo "    project opt_rl_eval_8b_math). Pass --train-args '--no-eval' to skip."
+echo "  Followed by dummy LR loop on top5 boost (also auto-evaluated)."
 echo "  Pass --train-args '--no-dummy' to skip the loop."
 echo "============================================================"
 bash "$TRAIN_SCRIPT" --no-tmux \
