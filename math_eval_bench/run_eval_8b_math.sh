@@ -25,6 +25,12 @@
 #   bash run_eval_8b_math.sh --pattern "*foo*,*bar*"  # Multiple globs (OR)
 #   bash run_eval_8b_math.sh --force                  # Re-run even if outputs exist
 #   bash run_eval_8b_math.sh --tp 2                   # tensor-parallel=2 (default 1)
+#   bash run_eval_8b_math.sh --no-base                # skip the un-trained base model
+#   bash run_eval_8b_math.sh --base-model /local/path # use a local Qwen3-8B-Base copy
+#
+# By default the un-trained Qwen/Qwen3-8B-Base is queued FIRST as a reference;
+# vLLM downloads it from HF on first run unless you pass --base-model with a
+# local path or pre-populate the HF cache.
 #
 # Output dir / wandb run-name include a temperature tag (t07, t06, ...) so
 # repeated runs at different T do not overwrite each other.
@@ -68,6 +74,12 @@ GPU_MEM_UTIL=0.85    # 0.85 leaves a bit more headroom than the boost script's 0
 # average@N for competition benchmarks (AMC only since AIME is dropped)
 AVG_AT_MAP="amc:32"
 
+# Whether to also evaluate the un-trained Qwen3-8B-Base reference. Default on.
+# Disable with --no-base. Override the path with --base-model.
+INCLUDE_BASE=true
+BASE_MODEL_PATH="${BASE_MODEL_PATH:-Qwen/Qwen3-8B-Base}"
+BASE_EXP_NAME="Qwen3-8B-Base_baseline"
+
 # Parsing
 DRY_RUN=false
 NO_TMUX=false
@@ -89,6 +101,8 @@ while [[ $# -gt 0 ]]; do
         --temperature)     TEMPERATURE="$2"; shift 2 ;;
         --tp)              TP_SIZE="$2"; shift 2 ;;
         --gpu-mem-util)    GPU_MEM_UTIL="$2"; shift 2 ;;
+        --no-base)         INCLUDE_BASE=false; shift ;;
+        --base-model)      BASE_MODEL_PATH="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -110,6 +124,8 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --temperature $(printf '%q' "$TEMPERATURE")"
     FULL_ARGS="$FULL_ARGS --tp $(printf '%q' "$TP_SIZE")"
     FULL_ARGS="$FULL_ARGS --gpu-mem-util $(printf '%q' "$GPU_MEM_UTIL")"
+    FULL_ARGS="$FULL_ARGS --base-model $(printf '%q' "$BASE_MODEL_PATH")"
+    $INCLUDE_BASE || FULL_ARGS="$FULL_ARGS --no-base"
     $DRY_RUN && FULL_ARGS="$FULL_ARGS --dry-run"
     $FORCE   && FULL_ARGS="$FULL_ARGS --force"
     [[ -n "$BENCHMARKS" ]] && FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
@@ -199,6 +215,21 @@ MATCHED_DIRS=0
 declare -A SEEN_DIRS
 > "$QUEUE_FILE"
 
+# ---- Always queue the un-trained base model first (unless --no-base) ----
+if $INCLUDE_BASE; then
+    for mt in $MAX_TOKENS_LIST; do
+        tok_tag="$mt"
+        [[ "$mt" == "3072" ]] && tok_tag="3k"
+        [[ "$mt" == "8192" ]] && tok_tag="8k"
+        output_dir="$RESULTS_BASE/${BASE_EXP_NAME}_${tok_tag}_${T_TAG}"
+        if [[ -f "$output_dir/overall_summary.json" ]] && ! $FORCE; then
+            SKIPPED_ALREADY_DONE+=("${BASE_EXP_NAME}_${tok_tag}_${T_TAG} [base]")
+            continue
+        fi
+        echo "$BASE_MODEL_PATH|$BASE_EXP_NAME|$mt|$tok_tag" >> "$QUEUE_FILE"
+    done
+fi
+
 # Iterate over each comma-separated glob and union the matched dirs.
 IFS=',' read -ra PATTERN_LIST <<< "$PATTERN"
 for pat in "${PATTERN_LIST[@]}"; do
@@ -249,6 +280,11 @@ echo "  Benchmarks:                $BENCHMARKS"
 echo "  Avg@N:                     $AVG_AT_MAP"
 echo "  GPUs:                      ${GPU_LIST[*]} ($NUM_GPUS workers, TP=$TP_SIZE)"
 echo "  vLLM:                      gpu_memory_utilization=$GPU_MEM_UTIL"
+if $INCLUDE_BASE; then
+    echo "  Base model in queue:       $BASE_MODEL_PATH  (as exp '$BASE_EXP_NAME')"
+else
+    echo "  Base model:                skipped (--no-base)"
+fi
 echo "  Params:                    T=$TEMPERATURE ($T_TAG) P=$TOP_P K=$TOP_K"
 echo "  WandB:                     $WANDB_ENTITY / $WANDB_PROJECT"
 echo "  Results:                   $RESULTS_BASE"
