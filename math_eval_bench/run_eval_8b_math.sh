@@ -70,6 +70,10 @@ SEED=42
 # vLLM sizing for 8B
 TP_SIZE=1            # 1 GPU per worker; one 8B fits comfortably on H100/H200
 GPU_MEM_UTIL=0.85    # 0.85 leaves a bit more headroom than the boost script's 0.90
+# 8B reports max_model_len=32768. KV-cache profiling at 32K causes vLLM v1
+# engine_core spawn to time out after 5 min ("Engine core initialization
+# failed. Failed core proc(s): {}"). Cap to 1024 prompt + 8192 response + margin.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 
 # average@N for competition benchmarks (AMC only since AIME is dropped)
 AVG_AT_MAP="amc:32"
@@ -99,6 +103,7 @@ while [[ $# -gt 0 ]]; do
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
         --max-tokens)      MAX_TOKENS_LIST="$2"; shift 2 ;;
         --temperature)     TEMPERATURE="$2"; shift 2 ;;
+        --max-model-len)   MAX_MODEL_LEN="$2"; shift 2 ;;
         --tp)              TP_SIZE="$2"; shift 2 ;;
         --gpu-mem-util)    GPU_MEM_UTIL="$2"; shift 2 ;;
         --no-base)         INCLUDE_BASE=false; shift ;;
@@ -122,6 +127,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
     FULL_ARGS="$FULL_ARGS --temperature $(printf '%q' "$TEMPERATURE")"
+    FULL_ARGS="$FULL_ARGS --max-model-len $(printf '%q' "$MAX_MODEL_LEN")"
     FULL_ARGS="$FULL_ARGS --tp $(printf '%q' "$TP_SIZE")"
     FULL_ARGS="$FULL_ARGS --gpu-mem-util $(printf '%q' "$GPU_MEM_UTIL")"
     FULL_ARGS="$FULL_ARGS --base-model $(printf '%q' "$BASE_MODEL_PATH")"
@@ -356,6 +362,8 @@ worker() {
 
         echo "[GPU $gpu_id] START $run_label"
 
+        local mml_args=()
+        [[ -n "$MAX_MODEL_LEN" ]] && mml_args=(--max-model-len "$MAX_MODEL_LEN")
         if CUDA_VISIBLE_DEVICES="$gpu_id" $PYTHON "$SCRIPT_DIR/eval.py" \
             --backend vllm \
             --model "$model_path" \
@@ -369,6 +377,7 @@ worker() {
             --top-k $TOP_K \
             --seed $SEED \
             --avg-at-map "$AVG_AT_MAP" \
+            "${mml_args[@]}" \
             --wandb-project "$WANDB_PROJECT" \
             --wandb-entity "$WANDB_ENTITY" \
             --wandb-run-name "$run_label" \
