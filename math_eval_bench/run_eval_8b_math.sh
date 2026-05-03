@@ -71,7 +71,15 @@ SEED=42
 # Default: 4 workers each TP=2 (8 GPUs total).  Eases /dev/shm + NCCL pressure
 # vs the prior 8 workers × TP=1 layout that kept tripping engine_core spawn.
 TP_SIZE="${TP_SIZE:-2}"
-GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
+# Lowered from 0.85 -> 0.70 because torch's CUDA caching allocator does NOT
+# release memory immediately when a vLLM subprocess exits. When the worker
+# loop pulls the next task, the previous eval's KV cache may still be held
+# by the driver, leaving only ~50 GB free on a 140 GB H200 -> ValueError.
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.70}"
+# Min free GiB required on each worker GPU before launching a new eval.
+# The worker waits up to MIN_FREE_GIB_TIMEOUT seconds, polling every 10s.
+MIN_FREE_GIB="${MIN_FREE_GIB:-100}"
+MIN_FREE_GIB_TIMEOUT="${MIN_FREE_GIB_TIMEOUT:-120}"
 # 8B reports max_model_len=32768. KV-cache profiling at 32K causes vLLM v1
 # engine_core spawn to time out after 5 min ("Engine core initialization
 # failed. Failed core proc(s): {}"). Cap to 1024 prompt + 8192 response + margin.
@@ -344,6 +352,34 @@ if [[ $TOTAL_TASKS -eq 0 ]]; then
     exit 0
 fi
 
+# Wait until every GPU in $1 (csv) reports >= $MIN_FREE_GIB free memory.
+# Returns 0 on success, 1 on timeout. Defensive against torch's lazy
+# CUDA-allocator release between sequential vLLM invocations.
+wait_for_gpu_free() {
+    local gpu_csv="$1"
+    local label="$2"
+    local elapsed=0
+    while (( elapsed < MIN_FREE_GIB_TIMEOUT )); do
+        # Get free MB per GPU (one number per line)
+        local mins
+        mins=$(CUDA_VISIBLE_DEVICES="" nvidia-smi -i "$gpu_csv" \
+                  --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null \
+              | awk -v t="$MIN_FREE_GIB" 'BEGIN{ok=1} {if ($1/1024 < t) ok=0} END{print ok}')
+        if [[ "$mins" == "1" ]]; then
+            return 0
+        fi
+        local snapshot
+        snapshot=$(CUDA_VISIBLE_DEVICES="" nvidia-smi -i "$gpu_csv" \
+                    --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null \
+                  | awk '{printf "GPU%s=%dG ", $1, $2/1024}')
+        echo "[$label] waiting for GPUs to free (need ${MIN_FREE_GIB}G each): $snapshot (${elapsed}s)"
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+    echo "[$label] WARNING: GPUs still busy after ${MIN_FREE_GIB_TIMEOUT}s; running eval anyway (will likely OOM)"
+    return 1
+}
+
 # ========== Worker function ==========
 # Each worker owns TP_SIZE GPUs (e.g. "0,1") and runs eval.py with TP=$TP_SIZE.
 worker() {
@@ -368,6 +404,10 @@ worker() {
         local run_label="${exp_name}_${tok_tag}_${T_TAG}"
         local output_dir="$RESULTS_BASE/${run_label}"
         local log_file="$LOG_DIR/${run_label}.log"
+
+        # Make sure the prior eval's CUDA memory has actually been released
+        # before we launch a new vLLM on these GPUs.
+        wait_for_gpu_free "$gpu_slice" "$worker_label"
 
         echo "[$worker_label gpus=$gpu_slice] START $run_label"
 
