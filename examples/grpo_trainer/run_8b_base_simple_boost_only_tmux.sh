@@ -174,25 +174,71 @@ should_run() {
     if [[ -n "$ONLY" ]]; then echo "$ONLY" | tr ',' '\n' | grep -qx "$n"; else [[ $n -gt $SKIP ]]; fi
 }
 
-# eval_ckpt EXP_NAME — delegate to the proven run_eval_boost_math.sh worker.
-# Passes --max-model-len 16384 so vLLM doesn't try to KV-cache-profile the
-# model's reported 32K context (8B at 32K causes engine_core spawn timeout
-# after 5 min and crashes with "Engine core initialization failed").
+# eval_ckpt EXP_NAME — single direct call to math_eval_bench/eval.py.
+# No worker mode, no queue, no tmux nesting, no bash layering. Just python.
+# eval.py loads vllm once and runs the 4 benches sequentially internally.
 eval_ckpt() {
     $RUN_EVAL_AFTER_TRAIN || return 0
     local exp_name="$1"
     [[ -z "$exp_name" ]] && return 0
-    [[ -d "$CKPT_ROOT/$exp_name" ]] || { echo "  [eval] skip — $CKPT_ROOT/$exp_name missing"; return 0; }
+
+    local exp_dir="$CKPT_ROOT/$exp_name"
+    [[ -d "$exp_dir" ]] || { echo "  [eval] skip — $exp_dir missing"; return 0; }
+
+    # Resolve latest global_step_*/actor/huggingface
+    local model_path="" best_num=-1
+    for step_dir in "$exp_dir"/global_step_*; do
+        [[ -d "$step_dir" ]] || continue
+        local num="${step_dir##*global_step_}"
+        [[ "$num" =~ ^[0-9]+$ ]] || continue
+        if [[ -f "$step_dir/actor/huggingface/config.json" ]] && (( num > best_num )); then
+            model_path="$step_dir/actor/huggingface"
+            best_num=$num
+        fi
+    done
+    if [[ -z "$model_path" ]]; then
+        echo "  [eval] skip — no completed global_step_*/actor/huggingface under $exp_dir"
+        return 0
+    fi
+
+    local out_dir="$EVAL_RESULTS_BASE/${exp_name}_8k_t06"
+    if [[ -f "$out_dir/overall_summary.json" ]]; then
+        echo "  [eval] already done: $out_dir"
+        return 0
+    fi
+    mkdir -p "$out_dir"
+    local log_file="$out_dir/eval.log"
+
+    # Use first GPU from $GPUS for the eval (one bench at a time, eval.py loops).
+    local first_gpu
+    first_gpu=$(echo "$GPUS" | cut -d, -f1)
 
     echo ""
-    echo "  ---- delegating eval to run_eval_boost_math.sh: $exp_name ----"
-    bash "$EVAL_DIR/run_eval_boost_math.sh" \
-        --no-tmux \
-        --ckpt-root "$CKPT_ROOT" \
-        --pattern "$exp_name" \
-        --wandb-project "$EVAL_WANDB_PROJECT" \
-        --gpus "$GPUS" \
+    echo "  ---- eval $exp_name on GPU $first_gpu (T=0.6, max_model_len=16384) ----"
+    echo "  model: $model_path"
+    echo "  out:   $out_dir"
+    echo "  log:   $log_file"
+
+    CUDA_VISIBLE_DEVICES="$first_gpu" \
+    python3 "$EVAL_DIR/eval.py" \
+        --backend vllm \
+        --model "$model_path" \
+        --benchmarks math500 gsm8k amc olympiadbench \
+        --tensor-parallel-size 1 \
+        --dtype auto \
+        --gpu-memory-utilization 0.85 \
         --max-model-len 16384 \
+        --max-tokens 8192 \
+        --temperature 0.6 \
+        --top-p 0.95 \
+        --top-k 20 \
+        --seed 42 \
+        --avg-at-map "amc:32" \
+        --wandb-project "$EVAL_WANDB_PROJECT" \
+        --wandb-entity "${WANDB_ENTITY:-mhong-university-of-minnesota}" \
+        --wandb-run-name "${exp_name}_8k_t06" \
+        --output-dir "$out_dir" \
+        2>&1 | tee "$log_file" \
         || echo "  [eval] returned non-zero (continuing)"
     echo ""
 }
