@@ -78,9 +78,13 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 # average@N for competition benchmarks (AMC only since AIME is dropped)
 AVG_AT_MAP="amc:32"
 
-# Whether to also evaluate the un-trained Qwen3-8B-Base reference. Default on.
-# Disable with --no-base. Override the path with --base-model.
-INCLUDE_BASE=true
+# Whether to also evaluate the un-trained Qwen3-8B-Base reference.
+# DEFAULT OFF: vLLM trying to fetch 'Qwen/Qwen3-8B-Base' from HuggingFace
+# was the root cause of repeated "Engine core initialization failed" crashes
+# on the advisor's server (slow / no internet / cache miss).
+# Enable with --include-base AND a local --base-model /path; the HF id is
+# only used as a last resort and will likely hang.
+INCLUDE_BASE=false
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-Qwen/Qwen3-8B-Base}"
 BASE_EXP_NAME="Qwen3-8B-Base_baseline"
 
@@ -107,7 +111,8 @@ while [[ $# -gt 0 ]]; do
         --tp)              TP_SIZE="$2"; shift 2 ;;
         --gpu-mem-util)    GPU_MEM_UTIL="$2"; shift 2 ;;
         --no-base)         INCLUDE_BASE=false; shift ;;
-        --base-model)      BASE_MODEL_PATH="$2"; shift 2 ;;
+        --include-base)    INCLUDE_BASE=true; shift ;;
+        --base-model)      BASE_MODEL_PATH="$2"; INCLUDE_BASE=true; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
