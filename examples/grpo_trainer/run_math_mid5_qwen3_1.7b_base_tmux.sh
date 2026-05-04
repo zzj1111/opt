@@ -228,8 +228,39 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  All experiments complete!"
-echo "  Starting dummy GPU hold job..."
+echo "  Initial experiments complete. Entering infinite 5-layer sweep."
 echo "============================================================"
-DUMMY_RUN_NAME="dummy_math_mid5_$(hostname)_$(date +%m%d_%H%M)" \
-    python3 "$SCRIPT_DIR/dummy_gpu_hold.py"
+
+# ========== Infinite 5-layer sweep ==========
+# Cycles through these contiguous 5-layer windows forever (or until killed).
+# Edit this array to change/extend the layer sets covered.
+SWEEP_LAYERS=(
+    "0,1,2,3,4"
+    "3,4,5,6,7"
+    "6,7,8,9,10"
+    "9,10,11,12,13"
+    "15,16,17,18,19"
+    "18,19,20,21,22"
+    "21,22,23,24,25"
+    "23,24,25,26,27"
+)
+
+SWEEP_LR="${SWEEP_LR:-5e-6}"
+ITER=0
+while true; do
+    for LAYERS in "${SWEEP_LAYERS[@]}"; do
+        ITER=$((ITER + 1))
+        # Build a layer-tag suitable for filenames: "0-4" instead of "0,1,2,3,4"
+        FIRST_L=${LAYERS%%,*}
+        LAST_L=${LAYERS##*,}
+        TAG="layers${FIRST_L}-${LAST_L}"
+        EXP_NAME="$(date +%m%d_%H%M)_loop${ITER}_${TAG}_Qwen3-1.7B-Base_math_lr${SWEEP_LR}"
+        echo "=========================================="
+        echo "  [LOOP iter=$ITER] $TAG (layers [$LAYERS]), LR=$SWEEP_LR"
+        echo "=========================================="
+        run_train "$EXP_NAME" "$DATA_DIR" "$SWEEP_LR" \
+            "+actor_rollout_ref.actor.train_layer_ids=[$LAYERS]"
+        echo "  [LOOP iter=$ITER] $TAG done."
+        echo ""
+    done
+done
