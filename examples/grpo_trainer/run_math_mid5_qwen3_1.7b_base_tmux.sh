@@ -210,7 +210,7 @@ if should_run 1; then
     echo "  [1/2] Layers 12-16 (middle-5), LR=5e-6"
     echo "=========================================="
     run_train "$EXP1_NAME" "$DATA_DIR" "5e-6" \
-        "+actor_rollout_ref.actor.train_layer_ids=12,13,14,15,16"
+        "+actor_rollout_ref.actor.train_layer_ids='12,13,14,15,16'"
     echo "  [1/2] Done."
     echo ""
 fi
@@ -259,7 +259,7 @@ while true; do
         echo "  [LOOP iter=$ITER] $TAG (layers [$LAYERS]), LR=$SWEEP_LR"
         echo "=========================================="
         run_train "$EXP_NAME" "$DATA_DIR" "$SWEEP_LR" \
-            "+actor_rollout_ref.actor.train_layer_ids=$LAYERS"
+            "+actor_rollout_ref.actor.train_layer_ids='$LAYERS'"
         echo "  [LOOP iter=$ITER] $TAG done."
         echo ""
     done
