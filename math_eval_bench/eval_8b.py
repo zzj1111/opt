@@ -1,25 +1,21 @@
-"""Self-contained 8B math evaluator that delegates to the BENCHMARKS registry.
+"""8B math evaluator — process-isolated per ckpt.
 
-Pipeline:
-  for every dir under --ckpt-root matching --pattern:
-    resolve latest global_step_*/actor/huggingface
-    skip if results/<ckpt>_8k_t06/summary.json already exists
-    LLM(model=...)                                 ← one vLLM per ckpt
-    for bench in args.benches:
-        b = get_benchmark(bench)                   ← uses math_eval/benchmarks
-        items   = b.load()
-        prompts = [b.build_prompt(it) for it in items]   ← chat-format messages
-        outs    = llm.chat(prompts, sampling)              (or n=N for avg@N)
-        for it, out in zip(items, outs.outputs):
-            for sample in out:
-                pred = b.extract_answer(sample.text)
-                ok   = b.is_correct(pred, it.gold_answer)
-        log accuracy to wandb
-    write summary.json + per-bench predictions.jsonl
-    tear vLLM down (gc + empty_cache); next ckpt
+Outer loop is a thin orchestrator that for every ckpt:
+  1. Spawns a FRESH python subprocess (this script with --single-ckpt mode)
+  2. The subprocess loads vLLM, evaluates 4 benches, writes summary.json, EXITS
+  3. After exit, the orchestrator pkills any leftover vllm/EngineCore process
+  4. Waits for GPU memory to actually free up (polls nvidia-smi)
+  5. Only then proceeds to the next ckpt
 
-No worker pool. ONE vLLM alive at a time. Sequential ckpts, sequential benches
-per ckpt (single llm.chat call per bench batches all prompts).
+Why subprocess per ckpt: vLLM spawns engine_core as a subprocess. `del llm`
+in the parent does NOT kill that subprocess reliably. The cleanest way to
+guarantee CUDA cleanup is to let the OS reap the entire python process —
+when this process exits, the kernel forcibly tears down all child processes,
+all CUDA contexts, all NCCL state. Nothing leaks.
+
+Usage:
+  python eval_8b.py                        # outer loop over all ckpts
+  python eval_8b.py --single-ckpt /path/to/ckpt   # inner: eval ONE ckpt and exit
 """
 
 from __future__ import annotations
@@ -28,17 +24,17 @@ import argparse
 import gc
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-# Disable broken JIT path on this server before importing vllm.
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
-# Add math_eval to path so `from math_eval.benchmarks import get_benchmark` works
-# regardless of CWD.
-_THIS_DIR = Path(__file__).parent
+_THIS = Path(__file__).resolve()
+_THIS_DIR = _THIS.parent
 sys.path.insert(0, str(_THIS_DIR))
 
 
@@ -48,13 +44,24 @@ sys.path.insert(0, str(_THIS_DIR))
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
+
+    # mode
+    p.add_argument("--single-ckpt", default=None,
+                   help="if set, evaluate ONLY this one ckpt dir and exit "
+                        "(used internally by the outer-loop spawn)")
+
+    # outer-loop only
     p.add_argument("--ckpt-root", default="/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints")
-    p.add_argument("--pattern", default="*Qwen3-8B-Base*",
-                   help="glob under --ckpt-root")
+    p.add_argument("--pattern", default="*Qwen3-8B-Base*")
+    p.add_argument("--gpu-free-gib", type=float, default=120.0,
+                   help="orchestrator: each GPU must have at least this much free "
+                        "memory (GiB) before the next ckpt is launched")
+    p.add_argument("--gpu-free-timeout", type=int, default=120,
+                   help="orchestrator: max seconds to wait for GPU to free up")
+
+    # both modes
     p.add_argument("--results-dir", default=str(_THIS_DIR / "results"))
-    p.add_argument("--tp", type=int, default=1,
-                   help="vLLM tensor-parallel size (default 1 — uniproc executor, "
-                        "NO TP subprocesses; uses 1 GPU, leaves the rest idle)")
+    p.add_argument("--tp", type=int, default=1)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     p.add_argument("--max-model-len", type=int, default=16384)
     p.add_argument("--max-tokens", type=int, default=8192)
@@ -62,19 +69,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--top-k", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--amc-n-samples", type=int, default=32,
-                   help="AMC avg@N (default 32)")
-    p.add_argument("--benches", default="math500,gsm8k,amc,olympiadbench",
-                   help="comma list; any name registered in math_eval.benchmarks")
-    p.add_argument("--subset", type=int, default=None,
-                   help="limit each bench to first N problems (debug)")
-    p.add_argument("--enable-thinking", action="store_true",
-                   help="enable Qwen3 <think> tags in chat template")
+    p.add_argument("--amc-n-samples", type=int, default=32)
+    p.add_argument("--benches", default="math500,gsm8k,amc,olympiadbench")
+    p.add_argument("--subset", type=int, default=None)
+    p.add_argument("--enable-thinking", action="store_true")
     p.add_argument("--wandb-project", default="opt_rl_eval_8b_math")
     p.add_argument("--wandb-entity", default="mhong-university-of-minnesota")
     p.add_argument("--no-wandb", action="store_true")
-    p.add_argument("--force", action="store_true",
-                   help="re-run ckpts that already have summary.json")
+    p.add_argument("--force", action="store_true")
     return p.parse_args()
 
 
@@ -83,7 +85,6 @@ def parse_args() -> argparse.Namespace:
 # =============================================================================
 
 def find_model_path(ckpt_dir: Path) -> Path | None:
-    """Latest global_step_*/actor/huggingface that has a config.json."""
     best, best_n = None, -1
     for step in ckpt_dir.glob("global_step_*"):
         if not step.is_dir():
@@ -98,13 +99,138 @@ def find_model_path(ckpt_dir: Path) -> Path | None:
     return best
 
 
+def kill_leftover_vllm() -> None:
+    """Nuclear cleanup of any vllm / EngineCore process the previous eval left behind."""
+    for pat in ("vllm.entrypoints", "vllm.engine", "vllm.worker", "EngineCore", "engine_core"):
+        try:
+            subprocess.run(["pkill", "-9", "-f", pat], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+
+def gpu_free_gib(visible_gpus: list[int] | None = None) -> list[float]:
+    """Return free memory (GiB) per GPU. Empty list if nvidia-smi not available."""
+    cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+    if visible_gpus is not None and len(visible_gpus) > 0:
+        cmd.extend(["-i", ",".join(str(i) for i in visible_gpus)])
+    try:
+        out = subprocess.check_output(cmd, text=True, timeout=10)
+    except Exception:
+        return []
+    return [float(x) / 1024 for x in out.strip().splitlines() if x.strip()]
+
+
+def wait_for_gpus_free(min_free_gib: float, timeout_sec: int) -> None:
+    """Block until every GPU has >= min_free_gib free, or timeout expires."""
+    elapsed = 0
+    while elapsed < timeout_sec:
+        frees = gpu_free_gib()
+        if frees and min(frees) >= min_free_gib:
+            print(f"  [orch] GPUs ready: min free = {min(frees):.1f} GiB")
+            return
+        snapshot = "  ".join(f"GPU{i}={f:.0f}G" for i, f in enumerate(frees))
+        print(f"  [orch] waiting for GPUs to free (need {min_free_gib} GiB each): {snapshot}  ({elapsed}s)")
+        time.sleep(10)
+        elapsed += 10
+    print(f"  [orch] WARNING: GPUs still not all free after {timeout_sec}s — proceeding anyway")
+
+
 # =============================================================================
-# Per-bench eval
+# OUTER LOOP — orchestrator
 # =============================================================================
 
-def eval_bench(llm, bench_name: str, sampling_params, n_samples: int,
-               args, predictions_path: Path) -> dict[str, Any]:
-    """Run one benchmark with one llm.chat call, score, return summary."""
+def outer_loop(args: argparse.Namespace) -> int:
+    ckpt_root = Path(args.ckpt_root)
+    if not ckpt_root.is_dir():
+        print(f"ERROR: --ckpt-root not found: {ckpt_root}")
+        return 1
+    ckpts = sorted(p for p in ckpt_root.glob(args.pattern) if p.is_dir())
+    if not ckpts:
+        print(f"ERROR: pattern '{args.pattern}' matched zero dirs under {ckpt_root}")
+        return 1
+
+    # validate bench names early
+    from math_eval.benchmarks import BENCHMARKS
+    bad = [b.strip() for b in args.benches.split(",") if b.strip() not in BENCHMARKS]
+    if bad:
+        print(f"ERROR: unknown bench(es): {bad}.  Available: {sorted(BENCHMARKS.keys())}")
+        return 1
+
+    print("=" * 70)
+    print(f"  ckpts to evaluate: {len(ckpts)}")
+    print(f"  benches:           {args.benches}")
+    print(f"  TP:                {args.tp}")
+    print(f"  results dir:       {args.results_dir}")
+    print(f"  wandb:             {'OFF' if args.no_wandb else f'{args.wandb_entity}/{args.wandb_project}'}")
+    print(f"  isolation:         each ckpt runs in its own python subprocess")
+    print(f"  cleanup:           pkill -9 vllm + wait for GPUs >= {args.gpu_free_gib} GiB free between ckpts")
+    print("=" * 70)
+
+    for i, ckpt_dir in enumerate(ckpts, 1):
+        name = ckpt_dir.name
+        summary_path = Path(args.results_dir) / f"{name}_8k_t06" / "summary.json"
+        if summary_path.exists() and not args.force:
+            print(f"\n[{i}/{len(ckpts)}] [skip] {name} — already evaluated")
+            continue
+
+        print("\n" + "=" * 70)
+        print(f"[{i}/{len(ckpts)}] {name}")
+        print("=" * 70)
+
+        # Pre-flight: make sure GPUs are clean BEFORE we even spawn
+        wait_for_gpus_free(args.gpu_free_gib, args.gpu_free_timeout)
+
+        # Spawn an isolated subprocess that does the actual eval and exits
+        cmd = [sys.executable, str(_THIS), "--single-ckpt", str(ckpt_dir)]
+        # forward all the inner-relevant flags
+        for flag, val in [
+            ("--results-dir", args.results_dir),
+            ("--tp", args.tp),
+            ("--gpu-memory-utilization", args.gpu_memory_utilization),
+            ("--max-model-len", args.max_model_len),
+            ("--max-tokens", args.max_tokens),
+            ("--temperature", args.temperature),
+            ("--top-p", args.top_p),
+            ("--top-k", args.top_k),
+            ("--seed", args.seed),
+            ("--amc-n-samples", args.amc_n_samples),
+            ("--benches", args.benches),
+            ("--wandb-project", args.wandb_project),
+            ("--wandb-entity", args.wandb_entity),
+        ]:
+            cmd.extend([flag, str(val)])
+        if args.subset is not None:
+            cmd.extend(["--subset", str(args.subset)])
+        if args.enable_thinking:
+            cmd.append("--enable-thinking")
+        if args.no_wandb:
+            cmd.append("--no-wandb")
+        if args.force:
+            cmd.append("--force")
+
+        print(f"  [orch] spawn: {' '.join(shlex.quote(x) for x in cmd)}")
+        rc = subprocess.run(cmd).returncode
+        if rc != 0:
+            print(f"  [orch] subprocess exited with code {rc} — continuing to next ckpt")
+
+        # Nuclear cleanup so the next ckpt starts on a clean GPU
+        print(f"  [orch] killing any leftover vllm / engine_core processes ...")
+        kill_leftover_vllm()
+        time.sleep(5)
+
+    print("\n" + "=" * 70)
+    print("  All ckpts processed.")
+    print("=" * 70)
+    return 0
+
+
+# =============================================================================
+# INNER MODE — eval ONE ckpt then exit
+# =============================================================================
+
+def eval_one_bench(llm, bench_name: str, sampling_params, n_samples: int,
+                   args, predictions_path: Path) -> dict[str, Any]:
     from math_eval.benchmarks import get_benchmark
 
     bench = get_benchmark(bench_name)
@@ -114,7 +240,6 @@ def eval_bench(llm, bench_name: str, sampling_params, n_samples: int,
 
     messages_list = [bench.build_prompt(it) for it in items]
 
-    # For avg@N use a copy of sampling_params with n=N; else use as-is.
     if n_samples > 1:
         from vllm import SamplingParams
         sp = SamplingParams(
@@ -136,7 +261,6 @@ def eval_bench(llm, bench_name: str, sampling_params, n_samples: int,
     outputs = llm.chat(messages_list, sp, **chat_kwargs)
     wall = time.time() - t0
 
-    # outputs aligned with items; each o.outputs is a list of n samples.
     correct_total = 0
     total = 0
     rows: list[dict[str, Any]] = []
@@ -180,32 +304,27 @@ def eval_bench(llm, bench_name: str, sampling_params, n_samples: int,
     }
 
 
-# =============================================================================
-# Per-ckpt eval
-# =============================================================================
-
-def eval_ckpt(ckpt_dir: Path, args) -> None:
+def inner_single_ckpt(args: argparse.Namespace) -> int:
+    ckpt_dir = Path(args.single_ckpt)
     name = ckpt_dir.name
+
     out_dir = Path(args.results_dir) / f"{name}_8k_t06"
     summary_path = out_dir / "summary.json"
     if summary_path.exists() and not args.force:
         print(f"[skip] {name} — already done ({summary_path})")
-        return
+        return 0
 
     model_path = find_model_path(ckpt_dir)
     if model_path is None:
         print(f"[skip] {name} — no completed global_step_*/actor/huggingface")
-        return
+        return 0
 
     out_dir.mkdir(parents=True, exist_ok=True)
     pred_dir = out_dir / "predictions"
     pred_dir.mkdir(exist_ok=True)
 
-    print("\n" + "=" * 70)
-    print(f"[ckpt] {name}")
     print(f"  model: {model_path}")
     print(f"  out:   {out_dir}")
-    print("=" * 70)
 
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -224,7 +343,6 @@ def eval_ckpt(ckpt_dir: Path, args) -> None:
         seed=args.seed,
     )
 
-    # Optional wandb run (one per ckpt; logs eval/<bench> + eval/math_avg)
     wandb_run = None
     if not args.no_wandb:
         try:
@@ -233,16 +351,10 @@ def eval_ckpt(ckpt_dir: Path, args) -> None:
                 project=args.wandb_project,
                 entity=args.wandb_entity,
                 name=f"{name}_8k_t06",
-                config={
-                    "ckpt": name,
-                    "model_path": str(model_path),
-                    "tp": args.tp,
-                    "max_model_len": args.max_model_len,
-                    "max_tokens": args.max_tokens,
-                    "temperature": args.temperature,
-                    "amc_n_samples": args.amc_n_samples,
-                    "enable_thinking": args.enable_thinking,
-                },
+                config={"ckpt": name, "model_path": str(model_path), "tp": args.tp,
+                        "max_model_len": args.max_model_len,
+                        "temperature": args.temperature,
+                        "amc_n_samples": args.amc_n_samples},
                 reinit=True,
             )
         except Exception as e:
@@ -256,7 +368,7 @@ def eval_ckpt(ckpt_dir: Path, args) -> None:
         n_samples = args.amc_n_samples if bench_name == "amc" else 1
         pred_path = pred_dir / f"{bench_name}.jsonl"
         try:
-            s = eval_bench(llm, bench_name, sampling_params, n_samples, args, pred_path)
+            s = eval_one_bench(llm, bench_name, sampling_params, n_samples, args, pred_path)
         except Exception as e:
             print(f"  [FAIL] bench {bench_name}: {type(e).__name__}: {e}")
             import traceback
@@ -273,15 +385,6 @@ def eval_ckpt(ckpt_dir: Path, args) -> None:
     overall = {
         "ckpt": name,
         "model_path": str(model_path),
-        "args": {
-            "tp": args.tp,
-            "max_model_len": args.max_model_len,
-            "max_tokens": args.max_tokens,
-            "temperature": args.temperature,
-            "amc_n_samples": args.amc_n_samples,
-            "benches": args.benches.split(","),
-            "enable_thinking": args.enable_thinking,
-        },
         "math_avg": math_avg,
         "benchmarks": bench_summaries,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -293,14 +396,11 @@ def eval_ckpt(ckpt_dir: Path, args) -> None:
         wandb_run.log({"eval/math_avg": math_avg})
         wandb_run.finish()
 
-    # Tear vLLM down so the next ckpt has clean GPUs.
+    # When this function returns + Python exits, the OS forcibly cleans up
+    # all CUDA contexts, all vLLM subprocesses, all NCCL state. Nothing leaks.
     del llm
     gc.collect()
-    try:
-        import torch
-        torch.cuda.empty_cache()
-    except Exception:
-        pass
+    return 0
 
 
 # =============================================================================
@@ -309,49 +409,9 @@ def eval_ckpt(ckpt_dir: Path, args) -> None:
 
 def main() -> int:
     args = parse_args()
-
-    ckpt_root = Path(args.ckpt_root)
-    if not ckpt_root.is_dir():
-        print(f"ERROR: --ckpt-root not found: {ckpt_root}")
-        return 1
-    ckpts = sorted(p for p in ckpt_root.glob(args.pattern) if p.is_dir())
-    if not ckpts:
-        print(f"ERROR: pattern '{args.pattern}' matched zero dirs under {ckpt_root}")
-        return 1
-
-    # Validate bench names early — fail fast if user typoed.
-    from math_eval.benchmarks import BENCHMARKS
-    bad = [b.strip() for b in args.benches.split(",") if b.strip() not in BENCHMARKS]
-    if bad:
-        print(f"ERROR: unknown benchmark(s): {bad}")
-        print(f"  Available: {sorted(BENCHMARKS.keys())}")
-        return 1
-
-    print("=" * 70)
-    print(f"  ckpts to evaluate: {len(ckpts)}")
-    print(f"  benches:           {args.benches}")
-    print(f"  TP:                {args.tp}")
-    print(f"  max_model_len:     {args.max_model_len}")
-    print(f"  max_tokens:        {args.max_tokens}")
-    print(f"  T={args.temperature}  top_p={args.top_p}  top_k={args.top_k}")
-    print(f"  amc avg@:          {args.amc_n_samples}")
-    print(f"  results dir:       {args.results_dir}")
-    print(f"  wandb:             {'OFF' if args.no_wandb else f'{args.wandb_entity}/{args.wandb_project}'}")
-    print("=" * 70)
-
-    for ckpt_dir in ckpts:
-        try:
-            eval_ckpt(ckpt_dir, args)
-        except Exception as e:
-            print(f"[FAIL] {ckpt_dir.name}: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            # Continue to next ckpt — never let one bad model take down the whole run.
-
-    print("\n" + "=" * 70)
-    print("  All ckpts processed.")
-    print("=" * 70)
-    return 0
+    if args.single_ckpt is not None:
+        return inner_single_ckpt(args)
+    return outer_loop(args)
 
 
 if __name__ == "__main__":
