@@ -31,7 +31,11 @@ done
 
 if [[ -z "${TMUX:-}" ]] && ! $NO_TMUX; then
     SESSION="eval_8b_py_$(date +%m%d_%H%M)"
-    ARGS=$(printf '%q ' "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}")
+    if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
+        ARGS=$(printf '%q ' "${PASSTHROUGH[@]}")
+    else
+        ARGS=""
+    fi
     DUMMY_FLAG=""
     $NO_DUMMY && DUMMY_FLAG="--no-dummy"
     tmux new-session -d -s "$SESSION" \
@@ -52,7 +56,11 @@ fi
 export WANDB_API_KEY
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
-python3 "$SCRIPT_DIR/eval_8b.py" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
+if [[ ${#PASSTHROUGH[@]} -gt 0 ]]; then
+    python3 "$SCRIPT_DIR/eval_8b.py" "${PASSTHROUGH[@]}"
+else
+    python3 "$SCRIPT_DIR/eval_8b.py"
+fi
 EVAL_RC=$?
 echo ""
 echo "=========================================================="
