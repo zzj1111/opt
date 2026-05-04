@@ -11,7 +11,7 @@
 #   1. Layers 12-16 only,   LR=5e-6   (middle-5 layer training)
 #   2. Full RL,             LR=1e-6   (baseline, all layers)
 #
-# All: batch=512, minibatch=128, microbatch=8, epochs=2, max_response_length=3072
+# All: batch=512, minibatch=128, microbatch=8, epochs=10 (override with EPOCHS=N), max_response_length=3072
 # Model: Qwen3-1.7B-Base, 8 GPUs, saves only last-step checkpoint in HF format.
 #
 # Usage:
@@ -96,7 +96,7 @@ run_train() {
     local MINI_BATCH="${7:-128}"
     local MICRO_BATCH="${8:-8}"
     local ROLLOUT_N="${9:-5}"
-    local EPOCHS="${10:-2}"
+    local EPOCHS="${10:-${EPOCHS:-10}}"
     local SAVE_FREQ="${11:--1}"
 
     local STEPS_PER_EPOCH
