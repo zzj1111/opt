@@ -52,8 +52,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pattern", default="*Qwen3-8B-Base*",
                    help="glob under --ckpt-root")
     p.add_argument("--results-dir", default=str(_THIS_DIR / "results"))
-    p.add_argument("--tp", type=int, default=2,
-                   help="vLLM tensor-parallel size (default 2)")
+    p.add_argument("--tp", type=int, default=1,
+                   help="vLLM tensor-parallel size (default 1 — uniproc executor, "
+                        "NO TP subprocesses; uses 1 GPU, leaves the rest idle)")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     p.add_argument("--max-model-len", type=int, default=16384)
     p.add_argument("--max-tokens", type=int, default=8192)
