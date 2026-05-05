@@ -22,6 +22,7 @@
 #   bash run_eval_04_supplement.sh --force                          # re-run everything (delete cached summaries)
 #   bash run_eval_04_supplement.sh --include-base                   # also evaluate Qwen/Qwen3-8B-Base (un-trained)
 #   bash run_eval_04_supplement.sh --include-base --base-model /local/path/to/base
+#   bash run_eval_04_supplement.sh --layers "5,7,11,13"             # only ckpts matching *_layer<N>_* for given N
 #   bash run_eval_04_supplement.sh --dry-run                        # preview which benches will run
 #   bash run_eval_04_supplement.sh --gpus 0,1,2,3 --no-tmux
 
@@ -69,6 +70,7 @@ DRY_RUN=false
 NO_TMUX=false
 FORCE=false
 INCLUDE_BASE=false
+LAYERS=""               # comma-list, e.g. "5,7,11,13"; empty = no filter
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --tp)              TP="$2"; shift 2 ;;
         --ckpt-root)       CKPT_ROOT="$2"; shift 2 ;;
         --pattern)         PATTERN="$2"; shift 2 ;;
+        --layers)          LAYERS="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --no-tmux)         NO_TMUX=true; shift ;;
         --force)           FORCE=true; shift ;;
@@ -100,6 +103,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --tp $TP"
     FULL_ARGS="$FULL_ARGS --ckpt-root $(printf '%q' "$CKPT_ROOT")"
     FULL_ARGS="$FULL_ARGS --pattern $(printf '%q' "$PATTERN")"
+    [[ -n "$LAYERS" ]] && FULL_ARGS="$FULL_ARGS --layers $(printf '%q' "$LAYERS")"
     FULL_ARGS="$FULL_ARGS --wandb-project $(printf '%q' "$WANDB_PROJECT")"
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
@@ -228,9 +232,33 @@ if $INCLUDE_BASE && [[ -n "$BASE_MODEL" ]]; then
 fi
 
 SKIPPED_NO_CKPT=()
+SKIPPED_LAYER_FILTER=0
+# Pre-parse layer filter list (empty = no filter, accept all)
+LAYER_LIST=()
+if [[ -n "$LAYERS" ]]; then
+    IFS=',' read -ra LAYER_LIST <<< "$LAYERS"
+fi
+
 for d in "$CKPT_ROOT"/$PATTERN; do
     [[ -d "$d" ]] || continue
     exp_name=$(basename "$d")
+
+    # Optional layer filter: keep only ckpts whose name matches *_layer<N>_*
+    # for some N in --layers. Substring match with anchoring underscores so
+    # layer5 doesn't accidentally match layer50 etc.
+    if (( ${#LAYER_LIST[@]} > 0 )); then
+        keep=false
+        for L in "${LAYER_LIST[@]}"; do
+            if [[ "$exp_name" == *_layer${L}_* ]]; then
+                keep=true; break
+            fi
+        done
+        if ! $keep; then
+            SKIPPED_LAYER_FILTER=$((SKIPPED_LAYER_FILTER + 1))
+            continue
+        fi
+    fi
+
     model_path=$(resolve_model_path "$d")
     if [[ -z "$model_path" ]]; then
         SKIPPED_NO_CKPT+=("$exp_name")
@@ -274,6 +302,7 @@ echo "============================================================"
 echo "  Supplementary / Resume Evaluation"
 echo "  Ckpt root:     $CKPT_ROOT"
 echo "  Match pattern: $PATTERN"
+[[ -n "$LAYERS" ]] && echo "  Layer filter:  $LAYERS  (skipped by filter: $SKIPPED_LAYER_FILTER)"
 $INCLUDE_BASE && echo "  Base model:    $BASE_MODEL  →  $BASE_NAME (queued first)"
 echo "  Benchmarks:    $BENCHMARKS"
 echo "  Mode:          $($FORCE && echo 'FORCE — re-run everything' || echo 'resume — only fill missing benches')"
