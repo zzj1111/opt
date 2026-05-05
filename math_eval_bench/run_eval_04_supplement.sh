@@ -20,6 +20,8 @@
 #   bash run_eval_04_supplement.sh --pattern '*Qwen3-1.7B*'         # any other glob
 #   bash run_eval_04_supplement.sh --benchmarks "math500 amc"       # only check these benches
 #   bash run_eval_04_supplement.sh --force                          # re-run everything (delete cached summaries)
+#   bash run_eval_04_supplement.sh --include-base                   # also evaluate Qwen/Qwen3-8B-Base (un-trained)
+#   bash run_eval_04_supplement.sh --include-base --base-model /local/path/to/base
 #   bash run_eval_04_supplement.sh --dry-run                        # preview which benches will run
 #   bash run_eval_04_supplement.sh --gpus 0,1,2,3 --no-tmux
 
@@ -30,6 +32,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ========== Configuration ==========
 CKPT_ROOT="${CKPT_ROOT:-/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints}"
 PATTERN="${PATTERN:-*Qwen3-8B-Base*}"
+# Optionally also evaluate the un-trained base model (--include-base flag).
+# Treated as a "ckpt" with name $BASE_NAME pointing at $BASE_MODEL (HF or local).
+BASE_MODEL="${BASE_MODEL:-Qwen/Qwen3-8B-Base}"
+BASE_NAME="${BASE_NAME:-Qwen3-8B-Base_baseline}"
 GPUS="0,1,2,3,4,5,6,7"
 RESULTS_BASE="$SCRIPT_DIR/results"
 LOG_DIR="$SCRIPT_DIR/logs/eval_04_supplement"
@@ -59,6 +65,7 @@ AVG_AT_MAP="amc:32"
 DRY_RUN=false
 NO_TMUX=false
 FORCE=false
+INCLUDE_BASE=false
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -69,6 +76,9 @@ while [[ $# -gt 0 ]]; do
         --dry-run)         DRY_RUN=true; shift ;;
         --no-tmux)         NO_TMUX=true; shift ;;
         --force)           FORCE=true; shift ;;
+        --include-base)    INCLUDE_BASE=true; shift ;;
+        --base-model)      BASE_MODEL="$2"; shift 2 ;;
+        --base-name)       BASE_NAME="$2"; shift 2 ;;
         --benchmarks)      BENCHMARKS="$2"; shift 2 ;;
         --wandb-project)   WANDB_PROJECT="$2"; shift 2 ;;
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
@@ -89,8 +99,9 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
     FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
-    $DRY_RUN && FULL_ARGS="$FULL_ARGS --dry-run"
-    $FORCE   && FULL_ARGS="$FULL_ARGS --force"
+    $DRY_RUN      && FULL_ARGS="$FULL_ARGS --dry-run"
+    $FORCE        && FULL_ARGS="$FULL_ARGS --force"
+    $INCLUDE_BASE && FULL_ARGS="$FULL_ARGS --include-base --base-model $(printf '%q' "$BASE_MODEL") --base-name $(printf '%q' "$BASE_NAME")"
     for arg in "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; do FULL_ARGS="$FULL_ARGS $(printf '%q' "$arg")"; done
 
     tmux new-session -d -s "$TMUX_SESSION" \
@@ -167,6 +178,29 @@ fi
 FULL_QUEUE=$(mktemp)
 LAYER_QUEUE=$(mktemp)
 shopt -s nullglob
+
+# Optional: queue the un-trained base model first (--include-base).
+# Skipped if BASE_MODEL is empty.
+if $INCLUDE_BASE && [[ -n "$BASE_MODEL" ]]; then
+    for mt in $MAX_TOKENS_LIST; do
+        tok_tag="$mt"
+        [[ "$mt" == "3072" ]] && tok_tag="3k"
+        [[ "$mt" == "8192" ]] && tok_tag="8k"
+        base_out="$RESULTS_BASE/${BASE_NAME}_${tok_tag}"
+        if $FORCE; then
+            base_missing="$BENCHMARKS"
+        else
+            base_missing=""
+            for bm in $BENCHMARKS; do
+                [[ ! -f "$base_out/$bm/summary.json" ]] && base_missing="$base_missing $bm"
+            done
+            base_missing=$(echo $base_missing | xargs)
+        fi
+        [[ -z "$base_missing" ]] && continue
+        echo "$BASE_MODEL|$BASE_NAME|$mt|$tok_tag|$base_missing" >> "$FULL_QUEUE"
+    done
+fi
+
 for d in "$CKPT_ROOT"/$PATTERN; do
     [[ -d "$d" ]] || continue
     exp_name=$(basename "$d")
@@ -209,6 +243,7 @@ echo "============================================================"
 echo "  Supplementary / Resume Evaluation"
 echo "  Ckpt root:     $CKPT_ROOT"
 echo "  Match pattern: $PATTERN"
+$INCLUDE_BASE && echo "  Base model:    $BASE_MODEL  →  $BASE_NAME (queued first)"
 echo "  Benchmarks:    $BENCHMARKS"
 echo "  Mode:          $($FORCE && echo 'FORCE — re-run everything' || echo 'resume — only fill missing benches')"
 echo "  Pending tasks: $TOTAL_TASKS"
