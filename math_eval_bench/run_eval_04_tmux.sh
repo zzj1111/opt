@@ -30,6 +30,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CKPT_ROOT="${CKPT_ROOT:-/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints}"
 PATTERN="${PATTERN:-*Qwen3-8B-Base*}"
 GPUS="0,1,2,3,4,5,6,7"
+# Each worker uses TP GPUs. Default: 4 workers × TP=2 on 8 GPUs.
+# (TP=1 with 8 workers OOM'd on 8B with heavy benches.)
+TP="${TP:-2}"
 RESULTS_BASE="$SCRIPT_DIR/results"
 LOG_DIR="$SCRIPT_DIR/logs/eval_04"
 
@@ -63,6 +66,7 @@ EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --gpus)            GPUS="$2"; shift 2 ;;
+        --tp)              TP="$2"; shift 2 ;;
         --ckpt-root)       CKPT_ROOT="$2"; shift 2 ;;
         --pattern)         PATTERN="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
@@ -81,6 +85,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
 
     FULL_ARGS="--no-tmux"
     FULL_ARGS="$FULL_ARGS --gpus $(printf '%q' "$GPUS")"
+    FULL_ARGS="$FULL_ARGS --tp $TP"
     FULL_ARGS="$FULL_ARGS --ckpt-root $(printf '%q' "$CKPT_ROOT")"
     FULL_ARGS="$FULL_ARGS --pattern $(printf '%q' "$PATTERN")"
     FULL_ARGS="$FULL_ARGS --wandb-project $(printf '%q' "$WANDB_PROJECT")"
@@ -109,6 +114,23 @@ export WANDB_ENTITY
 
 IFS=',' read -ra GPU_LIST <<< "$GPUS"
 NUM_GPUS=${#GPU_LIST[@]}
+
+# Group GPUs into TP-sized slices. Each worker owns one slice.
+if (( NUM_GPUS % TP != 0 )); then
+    echo "ERROR: --gpus has $NUM_GPUS GPUs, not divisible by --tp=$TP"
+    exit 1
+fi
+NUM_WORKERS=$(( NUM_GPUS / TP ))
+GPU_SLICES=()
+for ((w=0; w<NUM_WORKERS; w++)); do
+    slice=""
+    for ((j=0; j<TP; j++)); do
+        idx=$((w * TP + j))
+        slice+="${GPU_LIST[$idx]}"
+        (( j < TP - 1 )) && slice+=","
+    done
+    GPU_SLICES+=("$slice")
+done
 
 PYTHON="${PYTHON:-python3}"
 LOCK_DIR="$LOG_DIR/locks"
@@ -192,7 +214,7 @@ echo "  Skipped (no valid ckpt): ${#SKIPPED_NO_CKPT[@]}"
 echo "  Max tokens:    $MAX_TOKENS_LIST"
 echo "  Benchmarks:    $BENCHMARKS"
 echo "  Avg@N:         $AVG_AT_MAP"
-echo "  GPUs:          ${GPU_LIST[*]} ($NUM_GPUS workers, TP=1)"
+echo "  GPUs:          ${GPU_LIST[*]} → $NUM_WORKERS workers × TP=$TP"
 echo "  Params:        T=$TEMPERATURE P=$TOP_P K=$TOP_K"
 echo "  WandB:         $WANDB_ENTITY / $WANDB_PROJECT"
 echo "  Results:       $RESULTS_BASE"
@@ -221,7 +243,7 @@ fi
 
 # ========== Worker function ==========
 worker() {
-    local gpu_id="$1"
+    local gpu_slice="$1"   # comma-list of GPU ids, e.g. "0,1"
     local completed=0
     local failed=0
 
@@ -243,13 +265,13 @@ worker() {
         local output_dir="$RESULTS_BASE/${run_label}"
         local log_file="$LOG_DIR/${run_label}.log"
 
-        echo "[GPU $gpu_id] START $run_label"
+        echo "[GPUs $gpu_slice] START $run_label"
 
-        if CUDA_VISIBLE_DEVICES="$gpu_id" $PYTHON "$SCRIPT_DIR/eval.py" \
+        if CUDA_VISIBLE_DEVICES="$gpu_slice" $PYTHON "$SCRIPT_DIR/eval.py" \
             --backend vllm \
             --model "$model_path" \
             --benchmarks $BENCHMARKS \
-            --tensor-parallel-size 1 \
+            --tensor-parallel-size $TP \
             --dtype auto \
             --gpu-memory-utilization 0.90 \
             --max-tokens "$max_tokens" \
@@ -264,22 +286,22 @@ worker() {
             --output-dir "$output_dir" \
             > "$log_file" 2>&1; then
             completed=$((completed + 1))
-            echo "[GPU $gpu_id] DONE  $run_label (worker total: $completed)"
+            echo "[GPUs $gpu_slice] DONE  $run_label (worker total: $completed)"
         else
             failed=$((failed + 1))
-            echo "[GPU $gpu_id] FAIL  $run_label — see $log_file"
+            echo "[GPUs $gpu_slice] FAIL  $run_label — see $log_file"
         fi
     done
 
-    echo "[GPU $gpu_id] Worker finished. Completed: $completed, Failed: $failed"
+    echo "[GPUs $gpu_slice] Worker finished. Completed: $completed, Failed: $failed"
 }
 
 # ========== Launch workers ==========
 WORKER_PIDS=()
-for gpu_id in "${GPU_LIST[@]}"; do
-    worker "$gpu_id" &
+for slice in "${GPU_SLICES[@]}"; do
+    worker "$slice" &
     WORKER_PIDS+=($!)
-    echo "Worker launched on GPU $gpu_id (PID $!)"
+    echo "Worker launched on GPUs $slice (PID $!, TP=$TP)"
 done
 
 # Wait for all workers
