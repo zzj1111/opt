@@ -1,10 +1,11 @@
 #!/bin/bash
 # ==============================================================================
-# One-click evaluation of all 04* checkpoints (Worker Mode)
+# One-click evaluation of checkpoints matching a glob (Worker Mode)
 # ==============================================================================
 #
-# Evaluates all models under CKPT_ROOT that start with "04" on 15 benchmarks.
-# AMC/AIME use average@32. Results logged to WandB.
+# Default: evaluates all ckpts under $CKPT_ROOT whose dir name contains
+# "Qwen3-8B-Base" on 12 benchmarks (math + code + reasoning + language).
+# AMC uses average@32. Results logged to WandB.
 #
 # Worker mode: each GPU independently pulls tasks from a shared queue.
 # No GPU ever sits idle waiting for another.
@@ -12,12 +13,14 @@
 # Auto-launches tmux session and activates conda environment.
 #
 # Usage:
-#   bash run_eval_04_tmux.sh                       # Run all 04* models
-#   bash run_eval_04_tmux.sh --dry-run             # Preview what would run
-#   bash run_eval_04_tmux.sh --gpus 0,1,2,3        # Use specific GPUs
-#   bash run_eval_04_tmux.sh --ckpt-root /path     # Override checkpoint dir
-#   bash run_eval_04_tmux.sh --no-tmux             # Skip tmux auto-launch
-#   bash run_eval_04_tmux.sh --max-tokens "3072"   # Only 3k (default: "3072 8192")
+#   bash run_eval_04_tmux.sh                            # Run all *Qwen3-8B-Base* ckpts
+#   bash run_eval_04_tmux.sh --pattern '*Qwen3-1.7B*'   # Override match glob
+#   bash run_eval_04_tmux.sh --pattern '04*'            # Original 04-prefix behaviour
+#   bash run_eval_04_tmux.sh --dry-run                  # Preview what would run
+#   bash run_eval_04_tmux.sh --gpus 0,1,2,3             # Use specific GPUs
+#   bash run_eval_04_tmux.sh --ckpt-root /path          # Override checkpoint dir
+#   bash run_eval_04_tmux.sh --no-tmux                  # Skip tmux auto-launch
+#   bash run_eval_04_tmux.sh --max-tokens "3072"        # Override max-tokens
 
 set -uo pipefail
 
@@ -25,6 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ========== Configuration ==========
 CKPT_ROOT="${CKPT_ROOT:-/code/hongpaul-sandbox/temp/OPT-RL/opt/checkpoints}"
+PATTERN="${PATTERN:-*Qwen3-8B-Base*}"
 GPUS="0,1,2,3,4,5,6,7"
 RESULTS_BASE="$SCRIPT_DIR/results"
 LOG_DIR="$SCRIPT_DIR/logs/eval_04"
@@ -38,18 +42,18 @@ WANDB_API_KEY="${WANDB_API_KEY:-b8f38344ec7231ee89baa74ef7209dd5a43df6b2}"
 WANDB_ENTITY="${WANDB_ENTITY:-mhong-university-of-minnesota}"
 WANDB_PROJECT="${WANDB_PROJECT:-opt_rl_eval}"
 
-# Benchmarks
-BENCHMARKS="math500 gsm8k mbpp humaneval humaneval_plus livecodebench arc_challenge mmlu_pro bbh mgsm ceval amc aime2024 aime2025 olympiadbench gpqa_diamond ifeval"
+# Benchmarks (12: math + code + reasoning + language)
+BENCHMARKS="math500 gsm8k olympiadbench amc humaneval_plus mbpp livecodebench gpqa_diamond mmlu_pro ceval mgsm ifeval"
 
 # Generation params
 TEMPERATURE=0.6
 TOP_P=0.95
 TOP_K=20
-MAX_TOKENS_LIST="3072 8192"
+MAX_TOKENS_LIST="8192"
 SEED=42
 
 # average@N for competition benchmarks
-AVG_AT_MAP="amc:32,aime2024:32,aime2025:32"
+AVG_AT_MAP="amc:32"
 
 # Parsing
 DRY_RUN=false
@@ -60,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --gpus)            GPUS="$2"; shift 2 ;;
         --ckpt-root)       CKPT_ROOT="$2"; shift 2 ;;
+        --pattern)         PATTERN="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --no-tmux)         NO_TMUX=true; shift ;;
         --benchmarks)      BENCHMARKS="$2"; shift 2 ;;
@@ -77,6 +82,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     FULL_ARGS="--no-tmux"
     FULL_ARGS="$FULL_ARGS --gpus $(printf '%q' "$GPUS")"
     FULL_ARGS="$FULL_ARGS --ckpt-root $(printf '%q' "$CKPT_ROOT")"
+    FULL_ARGS="$FULL_ARGS --pattern $(printf '%q' "$PATTERN")"
     FULL_ARGS="$FULL_ARGS --wandb-project $(printf '%q' "$WANDB_PROJECT")"
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
@@ -146,7 +152,8 @@ fi
 
 FULL_QUEUE=$(mktemp)
 LAYER_QUEUE=$(mktemp)
-for d in "$CKPT_ROOT"/04*; do
+shopt -s nullglob
+for d in "$CKPT_ROOT"/$PATTERN; do
     [[ -d "$d" ]] || continue
     exp_name=$(basename "$d")
     model_path=$(resolve_model_path "$d")
@@ -172,7 +179,9 @@ rm -f "$FULL_QUEUE" "$LAYER_QUEUE"
 TOTAL_TASKS=$(wc -l < "$QUEUE_FILE")
 
 echo "============================================================"
-echo "  Checkpoint Evaluation — Worker Mode (04*)"
+echo "  Checkpoint Evaluation — Worker Mode"
+echo "  Ckpt root:     $CKPT_ROOT"
+echo "  Match pattern: $PATTERN"
 echo "  Pending tasks: $TOTAL_TASKS"
 echo "  Max tokens:    $MAX_TOKENS_LIST"
 echo "  Benchmarks:    $BENCHMARKS"
@@ -274,8 +283,8 @@ echo "  Results:  $RESULTS_BASE"
 echo "  WandB:    https://wandb.ai/$WANDB_ENTITY/$WANDB_PROJECT"
 echo "============================================================"
 
-# Generate comparison CSV
-COMPLETED_COUNT=$(ls "$RESULTS_BASE"/04*/overall_summary.json 2>/dev/null | wc -l)
+# Generate comparison CSV (uses same pattern as the eval queue, with _8k suffix)
+COMPLETED_COUNT=$(ls "$RESULTS_BASE"/${PATTERN}*/overall_summary.json 2>/dev/null | wc -l)
 if [[ $COMPLETED_COUNT -ge 2 ]]; then
     echo ""
     echo "Generating comparison table ($COMPLETED_COUNT results)..."
