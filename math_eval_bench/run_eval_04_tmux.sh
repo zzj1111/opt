@@ -116,8 +116,10 @@ QUEUE_FILE="$LOG_DIR/task_queue.txt"
 mkdir -p "$LOG_DIR" "$LOCK_DIR"
 
 # ========== Resolve model path ==========
-# Checkpoint structure: CKPT_ROOT/04xxx_exp_name/global_step_NNN/actor/huggingface/
-# Pick the largest global_step_* and append actor/huggingface/ if it exists.
+# Returns the largest global_step_<N> whose subdir actually contains a
+# recognized HF model (config.json present). Returns empty string if no
+# valid ckpt exists — caller MUST check and skip rather than fallback to
+# exp_dir (which would feed an invalid path to vllm and crash).
 resolve_model_path() {
     local exp_dir="$1"
     local best_step=""
@@ -125,23 +127,21 @@ resolve_model_path() {
     for step_dir in "$exp_dir"/global_step_*; do
         [[ -d "$step_dir" ]] || continue
         local num="${step_dir##*global_step_}"
-        if [[ "$num" =~ ^[0-9]+$ ]] && (( num > best_num )); then
+        [[ "$num" =~ ^[0-9]+$ ]] || continue
+        local candidate=""
+        if [[ -f "$step_dir/actor/huggingface/config.json" ]]; then
+            candidate="$step_dir/actor/huggingface"
+        elif [[ -f "$step_dir/actor/config.json" ]]; then
+            candidate="$step_dir/actor"
+        elif [[ -f "$step_dir/config.json" ]]; then
+            candidate="$step_dir"
+        fi
+        if [[ -n "$candidate" ]] && (( num > best_num )); then
             best_num=$num
-            best_step="$step_dir"
+            best_step="$candidate"
         fi
     done
-    if [[ -n "$best_step" ]]; then
-        # Check for actor/huggingface/ subdirectory
-        if [[ -d "$best_step/actor/huggingface" ]]; then
-            echo "$best_step/actor/huggingface"
-        elif [[ -d "$best_step/actor" ]]; then
-            echo "$best_step/actor"
-        else
-            echo "$best_step"
-        fi
-    else
-        echo "$exp_dir"
-    fi
+    echo "$best_step"
 }
 
 # ========== Build task queue (full models first) ==========
@@ -153,10 +153,15 @@ fi
 FULL_QUEUE=$(mktemp)
 LAYER_QUEUE=$(mktemp)
 shopt -s nullglob
+SKIPPED_NO_CKPT=()
 for d in "$CKPT_ROOT"/$PATTERN; do
     [[ -d "$d" ]] || continue
     exp_name=$(basename "$d")
     model_path=$(resolve_model_path "$d")
+    if [[ -z "$model_path" ]]; then
+        SKIPPED_NO_CKPT+=("$exp_name")
+        continue
+    fi
     for mt in $MAX_TOKENS_LIST; do
         tok_tag="$mt"
         [[ "$mt" == "3072" ]] && tok_tag="3k"
@@ -183,6 +188,7 @@ echo "  Checkpoint Evaluation — Worker Mode"
 echo "  Ckpt root:     $CKPT_ROOT"
 echo "  Match pattern: $PATTERN"
 echo "  Pending tasks: $TOTAL_TASKS"
+echo "  Skipped (no valid ckpt): ${#SKIPPED_NO_CKPT[@]}"
 echo "  Max tokens:    $MAX_TOKENS_LIST"
 echo "  Benchmarks:    $BENCHMARKS"
 echo "  Avg@N:         $AVG_AT_MAP"
@@ -191,6 +197,11 @@ echo "  Params:        T=$TEMPERATURE P=$TOP_P K=$TOP_K"
 echo "  WandB:         $WANDB_ENTITY / $WANDB_PROJECT"
 echo "  Results:       $RESULTS_BASE"
 echo "============================================================"
+if (( ${#SKIPPED_NO_CKPT[@]} > 0 )); then
+    echo "Skipped (no global_step_*/.../config.json found):"
+    for n in "${SKIPPED_NO_CKPT[@]}"; do echo "  - $n"; done
+    echo ""
+fi
 echo ""
 
 if $DRY_RUN; then
