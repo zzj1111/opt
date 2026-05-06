@@ -23,6 +23,8 @@
 #   bash run_eval_04_supplement.sh --include-base                   # also evaluate Qwen/Qwen3-8B-Base (un-trained)
 #   bash run_eval_04_supplement.sh --include-base --base-model /local/path/to/base
 #   bash run_eval_04_supplement.sh --layers "5,7,11,13"             # only ckpts matching *_layer<N>_* for given N
+#   bash run_eval_04_supplement.sh --subset-map "mmlu_pro:1504"      # cap mmlu_pro to 1/8 stratified (default behaviour)
+#   bash run_eval_04_supplement.sh --subset-map ""                   # disable subset cap; full mmlu_pro 12k
 #   bash run_eval_04_supplement.sh --dry-run                        # preview which benches will run
 #   bash run_eval_04_supplement.sh --gpus 0,1,2,3 --no-tmux
 
@@ -66,6 +68,10 @@ SEED=42
 # average@N for competition benchmarks
 AVG_AT_MAP="amc:32"
 
+# Per-bench subset limits. mmlu_pro full = 12,032 items (the elephant); cut to
+# 1/8 stratified across its 14 categories (mmlu_pro.py handles the strat sampling).
+SUBSET_MAP="mmlu_pro:1504"
+
 DRY_RUN=false
 NO_TMUX=false
 FORCE=false
@@ -89,6 +95,7 @@ while [[ $# -gt 0 ]]; do
         --benchmarks)      BENCHMARKS="$2"; shift 2 ;;
         --wandb-project)   WANDB_PROJECT="$2"; shift 2 ;;
         --avg-at-map)      AVG_AT_MAP="$2"; shift 2 ;;
+        --subset-map)      SUBSET_MAP="$2"; shift 2 ;;
         --max-tokens)      MAX_TOKENS_LIST="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
@@ -106,6 +113,7 @@ if [[ -z "${TMUX:-}" ]] && [[ "$NO_TMUX" == "false" ]]; then
     [[ -n "$LAYERS" ]] && FULL_ARGS="$FULL_ARGS --layers $(printf '%q' "$LAYERS")"
     FULL_ARGS="$FULL_ARGS --wandb-project $(printf '%q' "$WANDB_PROJECT")"
     FULL_ARGS="$FULL_ARGS --avg-at-map $(printf '%q' "$AVG_AT_MAP")"
+    [[ -n "$SUBSET_MAP" ]] && FULL_ARGS="$FULL_ARGS --subset-map $(printf '%q' "$SUBSET_MAP")"
     FULL_ARGS="$FULL_ARGS --max-tokens $(printf '%q' "$MAX_TOKENS_LIST")"
     FULL_ARGS="$FULL_ARGS --benchmarks $(printf '%q' "$BENCHMARKS")"
     $DRY_RUN      && FULL_ARGS="$FULL_ARGS --dry-run"
@@ -305,6 +313,7 @@ echo "  Match pattern: $PATTERN"
 [[ -n "$LAYERS" ]] && echo "  Layer filter:  $LAYERS  (skipped by filter: $SKIPPED_LAYER_FILTER)"
 $INCLUDE_BASE && echo "  Base model:    $BASE_MODEL  →  $BASE_NAME (queued first)"
 echo "  Benchmarks:    $BENCHMARKS"
+[[ -n "$SUBSET_MAP" ]] && echo "  Subset map:    $SUBSET_MAP"
 echo "  Mode:          $($FORCE && echo 'FORCE — re-run everything' || echo 'resume — only fill missing benches')"
 echo "  Pending tasks: $TOTAL_TASKS"
 echo "  Skipped (no valid ckpt): ${#SKIPPED_NO_CKPT[@]}"
@@ -361,6 +370,9 @@ worker() {
 
         echo "[GPUs $gpu_slice] START $run_label — bms: $missing_bms"
 
+        local subset_args=()
+        [[ -n "$SUBSET_MAP" ]] && subset_args=(--subset-map "$SUBSET_MAP")
+
         if CUDA_VISIBLE_DEVICES="$gpu_slice" $PYTHON "$SCRIPT_DIR/eval.py" \
             --backend vllm \
             --model "$model_path" \
@@ -374,6 +386,7 @@ worker() {
             --top-k $TOP_K \
             --seed $SEED \
             --avg-at-map "$AVG_AT_MAP" \
+            "${subset_args[@]}" \
             --wandb-project "$WANDB_PROJECT" \
             --wandb-entity "$WANDB_ENTITY" \
             --wandb-run-name "$run_label" \

@@ -25,9 +25,9 @@ class MMLUProBenchmark(Benchmark):
 
     def load(self, subset: Optional[int] = None) -> List[BenchmarkItem]:
         ds = load_dataset("TIGER-Lab/MMLU-Pro", split="test")
-        items = []
+        letters = "ABCDEFGHIJ"
+        items: List[BenchmarkItem] = []
         for i, row in enumerate(ds):
-            letters = "ABCDEFGHIJ"
             gold_idx = row["answer_index"]
             gold_letter = letters[gold_idx] if isinstance(gold_idx, int) else str(row["answer"])
             items.append(BenchmarkItem(
@@ -39,8 +39,21 @@ class MMLUProBenchmark(Benchmark):
                     "category": row.get("category"),
                 },
             ))
-        if subset:
-            items = items[:subset]
+        if subset and subset < len(items):
+            # Stratified subset: dataset is clustered by category, naive items[:N]
+            # would only cover the first 1-2 of 14 categories. Take ~equal share
+            # from each category in the order they first appear.
+            from collections import OrderedDict
+            by_cat: "OrderedDict[str, List[BenchmarkItem]]" = OrderedDict()
+            for it in items:
+                cat = (it.metadata or {}).get("category", "unknown") or "unknown"
+                by_cat.setdefault(cat, []).append(it)
+            n_cats = len(by_cat)
+            per_cat = max(1, subset // n_cats)
+            sampled: List[BenchmarkItem] = []
+            for cat, lst in by_cat.items():
+                sampled.extend(lst[:per_cat])
+            items = sampled[:subset]
         return items
 
     def build_prompt(self, item: BenchmarkItem) -> List[dict]:
