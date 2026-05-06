@@ -117,11 +117,13 @@ if [[ "$MODE" == "lora" ]]; then
 fi
 
 # ---------- Memory / offload defaults ----------
-# 32B + 65K seq is heavy.  Always offload params; under full fine-tune also
-# offload optimizer.
-OFFLOAD_PARAMS=True
-OFFLOAD_OPT=False
-if [[ "$MODE" == "full" ]]; then OFFLOAD_OPT=True; fi
+# 32B + long-seq SFT.  Use verl's offload_params (param state to CPU) but
+# leave FSDP's cpu_offload OFF — turning both on causes an FSDP device
+# mismatch ("attempting to assign a gradient with device type 'cuda' to
+# a tensor with device type 'cpu'").  Override with OFFLOAD_PARAMS=False
+# / CPU_OFFLOAD=True if you have a different memory profile.
+OFFLOAD_PARAMS="${OFFLOAD_PARAMS:-True}"
+CPU_OFFLOAD="${CPU_OFFLOAD:-False}"
 
 echo "============================================================"
 echo "  Kevin-32B SFT"
@@ -131,7 +133,7 @@ echo "  Data:        $DATA_DIR"
 echo "  Save:        $SAVE_DIR"
 echo "  GPUs:        $GPUS  ($NGPUS)   ulysses_sp=$ULYSSES_SP"
 echo "  Epochs:      $EPOCHS    LR: $LR"
-echo "  MaxLength:   $MAX_LENGTH    OffloadParams=$OFFLOAD_PARAMS  OffloadOpt=$OFFLOAD_OPT"
+echo "  MaxLength:   $MAX_LENGTH    OffloadParams=$OFFLOAD_PARAMS  CpuOffload=$CPU_OFFLOAD"
 echo "  Project:     $PROJECT  /  $EXP_NAME"
 echo "  Log:         $LOG_FILE"
 echo "============================================================"
@@ -153,7 +155,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NGPUS \
     model.enable_gradient_checkpointing=True \
     model.trust_remote_code=True \
     model.fsdp_config.offload_params=$OFFLOAD_PARAMS \
-    model.fsdp_config.cpu_offload=$OFFLOAD_OPT \
+    model.fsdp_config.cpu_offload=$CPU_OFFLOAD \
     $LORA_ARGS \
     use_remove_padding=True \
     ulysses_sequence_parallel_size=$ULYSSES_SP \
