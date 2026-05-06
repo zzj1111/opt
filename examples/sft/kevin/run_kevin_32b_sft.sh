@@ -13,6 +13,7 @@
 #
 # Override knobs (env vars):
 #   MODEL_PATH    Path or HF id of the model      (default: cognition-ai/Kevin-32B)
+#   INPUT_JSONL   Source JSONL                    (default: $PROJ_DIR/sft_train.jsonl)
 #   DATA_DIR      Where the parquet lives         (default: $PROJ_DIR/data/kevin_sft)
 #   CKPT_ROOT     Where to save                   (default: $PROJ_DIR/checkpoints)
 #   GPUS          CUDA_VISIBLE_DEVICES list       (default: 0,1,2,3,4,5,6,7)
@@ -32,6 +33,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 PROJ_DIR=$(cd "$SCRIPT_DIR/../../.." && pwd)
 
 MODEL_PATH="${MODEL_PATH:-cognition-ai/Kevin-32B}"
+INPUT_JSONL="${INPUT_JSONL:-$PROJ_DIR/sft_train.jsonl}"
 DATA_DIR="${DATA_DIR:-$PROJ_DIR/data/kevin_sft}"
 CKPT_ROOT="${CKPT_ROOT:-$PROJ_DIR/checkpoints}"
 GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
@@ -65,6 +67,7 @@ if [[ -z "${TMUX:-}" ]] && [[ -z "$NO_TMUX" ]]; then
          cd $PROJ_DIR && \
          NO_TMUX=1 \
          MODEL_PATH=$(printf '%q' "$MODEL_PATH") \
+         INPUT_JSONL=$(printf '%q' "$INPUT_JSONL") \
          DATA_DIR=$(printf '%q' "$DATA_DIR") \
          CKPT_ROOT=$(printf '%q' "$CKPT_ROOT") \
          GPUS=$(printf '%q' "$GPUS") \
@@ -86,9 +89,14 @@ fi
 
 # ---------- Data prep ----------
 if [[ -z "$SKIP_PREP" ]]; then
-    echo "[prep] Building $DATA_DIR/{train,val}.parquet from sft_train.jsonl ..."
+    if [[ ! -f "$INPUT_JSONL" ]]; then
+        echo "ERROR: source JSONL not found: $INPUT_JSONL"
+        echo "       set INPUT_JSONL=/path/to/sft_train.jsonl or SKIP_PREP=1"
+        exit 1
+    fi
+    echo "[prep] Building $DATA_DIR/{train,val}.parquet from $INPUT_JSONL ..."
     python3 "$PROJ_DIR/examples/data_preprocess/kevin_sft.py" \
-        --input "$PROJ_DIR/sft_train.jsonl" \
+        --input "$INPUT_JSONL" \
         --output_dir "$DATA_DIR"
 fi
 
