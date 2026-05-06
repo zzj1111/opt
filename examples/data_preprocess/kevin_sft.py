@@ -65,7 +65,12 @@ def convert(input_path: Path, output_dir: Path) -> None:
         raise ValueError(f"No 'train' split rows found in {input_path}")
 
     train_rows = by_split["train"]
-    val_rows = by_split.get("val") or by_split.get("test") or train_rows[:1]
+    val_rows = by_split.get("val") or by_split.get("test")
+    if not val_rows:
+        # No explicit val split. Use a tiny holdout (>=2 rows) to dodge a verl
+        # bug where squeezing a (1,1) DataFrame collapses to a scalar string.
+        n = max(2, min(len(train_rows), 2))
+        val_rows = train_rows[:n]
 
     pd.DataFrame(train_rows).to_parquet(output_dir / "train.parquet", index=False)
     pd.DataFrame(val_rows).to_parquet(output_dir / "val.parquet", index=False)
