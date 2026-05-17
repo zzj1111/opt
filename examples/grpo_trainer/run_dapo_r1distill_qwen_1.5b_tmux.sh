@@ -151,7 +151,10 @@ gen_tp=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
-offload=True
+# Offloading is for large models (e.g. 32B). For 1.5B keep params/optim on GPU,
+# otherwise UpdateAnalysisTracker's FSDP.summon_full_params asserts (it requires
+# the FlatParameter to be on the compute device, not CPU-offloaded).
+offload=False
 
 # Save twice total — middle + end. Compute total step count from dataset size,
 # then save_freq = ceil(total_steps / 2). With 1 epoch and train_prompt_bsz
