@@ -1416,9 +1416,13 @@ class DataParallelPPOActor(BasePPOActor):
                 print("[Actor] tie_word_embeddings=False, skipping LMHeadGradTracker & tied diagnostics")
 
         # --- Update analysis tracker (sparsity & effective rank, actor only) ---
+        # Disabled: tracker calls FSDP.summon_full_params at init which breaks
+        # when param_offload=True, costs ~6 GB CPU RAM/rank for snapshots, and
+        # isn't needed for any current experiment. Re-enable by un-commenting
+        # the block below if you want sparsity / effective-rank diagnostics.
         self._update_tracker = None
-        if actor_optimizer is not None:
-            self._update_tracker = UpdateAnalysisTracker(actor_module)
+        # if actor_optimizer is not None:
+        #     self._update_tracker = UpdateAnalysisTracker(actor_module)
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
