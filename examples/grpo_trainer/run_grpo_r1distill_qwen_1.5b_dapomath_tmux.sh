@@ -97,9 +97,12 @@ NGPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
 MODEL_SHORT=$(basename "$MODEL")
 DATE=$(date +%m%d_%H%M)
 
-BATCH_SIZE=512
-MINI_BATCH=128
-MICRO_BATCH=8
+# Halved from run_4b_base defaults (was 512/128/8) — R1-Distill produces long
+# CoT (~4-8K tokens) so smaller batches reduce KV cache pressure during the
+# rollout phase and ease NCCL load.
+BATCH_SIZE=256
+MINI_BATCH=64
+MICRO_BATCH=4
 ROLLOUT_N=5
 EPOCHS="${EPOCHS:-5}"
 
@@ -172,7 +175,7 @@ run_one_grpo() {
         actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
         actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
         actor_rollout_ref.rollout.name=vllm \
-        actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+        actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
         actor_rollout_ref.rollout.n=$ROLLOUT_N \
         actor_rollout_ref.rollout.temperature=0.9 \
         actor_rollout_ref.rollout.top_k=20 \
