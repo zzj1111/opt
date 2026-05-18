@@ -138,11 +138,13 @@ gen_prompt_bsz=$((train_prompt_bsz * 3))
 n_resp_per_prompt=5                  # user spec — group size
 train_prompt_mini_bsz=32
 
-# Rollout decoding
-temperature=1.0
-top_p=1.0
-top_k=-1
-val_top_p=0.7
+# Rollout decoding — matched to working run_4b_base_part1_tmux.sh
+# (DAPO defaults were 1.0 / 1.0 / -1; widely-varying seq length there can
+# aggravate dynamic-bsz NCCL hangs.)
+temperature=0.9
+top_p=0.95
+top_k=20
+val_top_p=0.95
 
 # Hardware (1.5B fits trivially on 1 GPU; keep sp=1, tp=1)
 NGPUS_PER_NODE=$(echo "$GPUS" | tr ',' '\n' | wc -l)
@@ -236,9 +238,9 @@ run_one_dapo() {
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
-    actor_rollout_ref.rollout.enable_chunked_prefill=True \
+    actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
