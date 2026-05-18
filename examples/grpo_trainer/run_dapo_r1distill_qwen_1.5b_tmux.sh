@@ -50,7 +50,10 @@ MODEL="${MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
 GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
 CKPT_ROOT="${CKPT_ROOT:-$PROJ_DIR/checkpoints}"
 DATA_DIR="${DATA_DIR:-$PROJ_DIR/data}"           # holds dapo-math-17k.parquet + aime-2024.parquet
-TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/dapo-math-17k.parquet}"
+# Use open-r1's "Processed" version (17,398 unique rows, ~6 MB) instead of the
+# BytedTsinghua expanded version (~1.79M rows, ~285 MB) which made 1 epoch
+# ≈ 1166 training steps — way too long.
+TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/dapo-math-17k-processed.parquet}"
 TEST_FILE="${TEST_FILE:-$DATA_DIR/aime-2024.parquet}"
 CONDA_INIT="${CONDA_INIT:-/code/hongpaul-sandbox/cuda/miniconda3/bin/activate}"
 CONDA_ENV_PATH="${CONDA_ENV_PATH:-/code/hongpaul-sandbox/cuda/miniconda3/envs/cuda}"
@@ -100,8 +103,8 @@ fi
 # ===== preflight: auto-download data if missing =====
 mkdir -p "$DATA_DIR" "$CKPT_ROOT"
 if [[ ! -f "$TRAIN_FILE" ]]; then
-    echo "[data] $TRAIN_FILE missing, downloading DAPO-Math-17k from HF..."
-    wget -O "$TRAIN_FILE" "https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k/resolve/main/data/dapo-math-17k.parquet?download=true"
+    echo "[data] $TRAIN_FILE missing, downloading open-r1/DAPO-Math-17k-Processed (all, 17,398 rows)..."
+    wget -O "$TRAIN_FILE" "https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed/resolve/main/all/train-00000-of-00001.parquet?download=true"
 fi
 if [[ ! -f "$TEST_FILE" ]]; then
     echo "[data] $TEST_FILE missing, downloading AIME-2024 from HF..."
@@ -158,11 +161,11 @@ infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 # CPU↔GPU transfer overhead.
 offload=False
 
-# Save twice total — middle + end. Compute total step count from dataset size,
-# then save_freq = ceil(total_steps / 2). With 1 epoch and train_prompt_bsz
-# prompts/step, total_steps ≈ |train_set| / train_prompt_bsz.
+# Save twice total — middle + end. Compute total step count from dataset size.
+# verl's dataloader yields gen_batch_size prompts per iter (not train_batch_size),
+# so total_training_steps = len(dataset) // gen_batch_size × total_epochs.
 TOTAL_EPOCHS=1
-STEPS_PER_EPOCH=$(python3 -c "import pandas as pd; print(max(1, len(pd.read_parquet('$TRAIN_FILE')) // $train_prompt_bsz))")
+STEPS_PER_EPOCH=$(python3 -c "import pandas as pd; print(max(1, len(pd.read_parquet('$TRAIN_FILE')) // $gen_prompt_bsz))")
 TOTAL_STEPS=$((STEPS_PER_EPOCH * TOTAL_EPOCHS))
 SAVE_FREQ=$(( (TOTAL_STEPS + 1) / 2 ))      # ceil(N/2) → saves at step ceil(N/2) and step N
 
