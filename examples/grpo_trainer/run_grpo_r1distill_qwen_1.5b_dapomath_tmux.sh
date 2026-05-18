@@ -101,7 +101,7 @@ BATCH_SIZE=512
 MINI_BATCH=128
 MICRO_BATCH=8
 ROLLOUT_N=5
-EPOCHS="${EPOCHS:-1}"
+EPOCHS="${EPOCHS:-5}"
 
 # Save twice: mid + end. STEPS_PER_EPOCH = data_size / BATCH_SIZE (matches verl
 # when gen_batch_size is NOT set, which is our case — GRPO uses train_batch_size).
