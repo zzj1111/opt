@@ -176,9 +176,19 @@ def is_correct_minerva(
     Returns:
         Tuple of (is_correct, normalized_prediction)
     """
-    # Extract answer from solution
-    match = re.findall(answer_pattern, solution_str)
-    extracted_answer = match[-1] if match else "[INVALID]"
+    # Try the last \boxed{...} first — R1-Distill / Qwen2.5-Math / most reasoning
+    # models put the final answer there. Fall back to "Answer: X" regex.
+    extracted_answer = "[INVALID]"
+    try:
+        boxed = last_boxed_only_string(solution_str)
+        if boxed is not None:
+            extracted_answer = remove_boxed(boxed)
+    except Exception:
+        extracted_answer = "[INVALID]"
+    if extracted_answer == "[INVALID]" or extracted_answer == "":
+        match = re.findall(answer_pattern, solution_str)
+        extracted_answer = match[-1] if match else "[INVALID]"
+
     pred = normalize_final_answer(extracted_answer)
 
     # Process ground truth
@@ -256,8 +266,12 @@ def compute_score(
     Returns:
         Reward score (1.0 for correct, -1.0 for incorrect)
     """
-    # Limit solution length for efficiency
-    solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
+    # NOTE: removed the previous `solution_str = solution_str[-300:]` truncation.
+    # That assumed the final answer sits in the last 300 chars (good for
+    # short-CoT models like Qwen2.5-Math) but broke reasoning models such as
+    # DeepSeek-R1-Distill which put `\boxed{...}` after thousands of thinking
+    # tokens. Searching the full string is fine — `last_boxed_only_string`
+    # only scans for the last `\boxed{`, which is cheap.
 
     # Verify the solution
     correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
